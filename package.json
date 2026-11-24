@@ -16,6 +16,7 @@
     "test": "node --test --test-concurrency=1 'packages/*/test/**/*.test.ts' 'packages/web/test/**/*.test.js'",
     "test:unit": "node --test 'packages/protocol/test/**/*.test.ts' 'packages/relay/test/**/*.test.ts'",
     "test:integration": "node --test --test-concurrency=1 'packages/*/test/integration/**/*.test.ts'",
+    "test:composer-browser": "node scripts/test-composer-browser.mjs",
     "build:relay": "node scripts/build-relay.mjs",
     "start": "node packages/spencer/src/main.ts",
     "build:binary": "node scripts/build-binary.mjs"

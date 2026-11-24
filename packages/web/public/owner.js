@@ -410,5 +410,5 @@ export function ownerView(main) {
   });
 
   const offs = [on("owner", () => (render(), renderBusy())), on("busy", () => (render(), renderBusy())), on("followups", renderLater), on("model", renderLater)];
-  return { destroy: () => { ownerDraftState.renderers.delete(renderDraftsForView); offs.forEach((f) => f()); } };
+  return { destroy: () => { ownerDraftState.renderers.delete(renderDraftsForView); comp.destroy(); offs.forEach((f) => f()); } };
 }

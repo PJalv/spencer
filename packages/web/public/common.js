@@ -201,7 +201,10 @@ export function composer({ placeholder, label, hint, left, popup, drafts, canSen
     }
   });
   input.addEventListener("input", () => { onTextChange?.(input.value); sync(); });
-  return { form, input, sync };
+  const onResize = () => sync();
+  window.addEventListener("resize", onResize);
+  requestAnimationFrame(() => { if (input.isConnected) sync(); });
+  return { form, input, sync, destroy: () => window.removeEventListener("resize", onResize) };
 }
 
 export const SEND_HINT = () => [h("kbd", null, "Enter"), " to send, ", h("kbd", null, "Shift"), " ", h("kbd", null, "Enter"), " for a new line"];

@@ -10,6 +10,7 @@ Object.assign(globalThis, {
   Event: browser.Event,
   MutationObserver: browser.MutationObserver,
   KeyboardEvent: browser.KeyboardEvent,
+  requestAnimationFrame: () => 0,
   localStorage: browser.localStorage,
 });
 const { createFilePicker, createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } = await import("../public/draft-dom.js");
@@ -98,6 +99,7 @@ test("dismissing an ambiguous draft unlocks the composer and recovers its pendin
   await Promise.resolve();
   assert.deepEqual(textSent, ["send this message"]);
   assert.equal(view.input.value, "");
+  view.destroy();
   view.form.remove();
 });
 
@@ -137,6 +139,7 @@ test("typing leaves the draft DOM and live status untouched, and empty Send stay
   assert.equal(send.disabled, true);
   assert.equal(sends, 0);
   observer.disconnect();
+  view.destroy();
   view.form.remove();
 });
 
@@ -163,6 +166,8 @@ test("a mounted composer cannot re-enter a send started by another mount", async
   finish(true);
   await Promise.resolve();
   await Promise.resolve();
+  first.destroy();
+  second.destroy();
   first.form.remove();
   second.form.remove();
 });
