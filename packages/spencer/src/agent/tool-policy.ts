@@ -1,14 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 
 export type ToolPolicyScope = { scopeKind: 'global' | 'channel' | 'peer'; scopeId: string };
 export interface ToolPolicy extends ToolPolicyScope {
   id: string; toolPattern: string; effect: 'allow' | 'ask_owner' | 'deny';
-  argDefaults?: Record<string, unknown>; argLocks?: Record<string, unknown>;
-  argAllowValues?: Record<string, unknown[]>; note?: string; updatedAt: number;
+  note?: string; updatedAt: number;
 }
 const forbidden = new Set(['__proto__', 'constructor', 'prototype']);
+const allowedFields = new Set(['id', 'scopeKind', 'scopeId', 'toolPattern', 'effect', 'note', 'updatedAt']);
 function object(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 function safe(v: unknown): void {
   if (Array.isArray(v)) { v.forEach(safe); return; }
@@ -16,6 +15,18 @@ function safe(v: unknown): void {
     if (forbidden.has(k)) throw new Error('Forbidden prototype key');
     safe(x);
   }
+}
+function fromRow(row: { rule?: unknown }): ToolPolicy {
+  const r = JSON.parse(String(row.rule)) as ToolPolicy;
+  return {
+    id: r.id,
+    scopeKind: r.scopeKind,
+    scopeId: r.scopeId,
+    toolPattern: r.toolPattern,
+    effect: r.effect,
+    ...(typeof r.note === 'string' ? { note: r.note } : {}),
+    updatedAt: r.updatedAt,
+  };
 }
 export function validateScope(s: ToolPolicyScope): void {
   if (!['global', 'channel', 'peer'].includes(s.scopeKind) || (s.scopeKind === 'global' ? s.scopeId !== '*' : !/^[\w-]{1,128}$/.test(s.scopeId))) throw new Error('Invalid policy scope');
@@ -27,20 +38,18 @@ export function parsePolicies(value: unknown, scope: ToolPolicyScope): ToolPolic
   return value.map((r: unknown) => {
     if (!object(r) || typeof r.toolPattern !== 'string' || !r.toolPattern.length || r.toolPattern.length > 128 || /[\x00-\x20]/.test(r.toolPattern) || !['allow', 'ask_owner', 'deny'].includes(String(r.effect))) throw new Error('Invalid tool pattern or effect');
     if ((r.scopeKind !== undefined && r.scopeKind !== scope.scopeKind) || (r.scopeId !== undefined && r.scopeId !== scope.scopeId)) throw new Error('Rule scope must match the route');
-    const fields = new Set(['id', 'scopeKind', 'scopeId', 'toolPattern', 'effect', 'argDefaults', 'argLocks', 'argAllowValues', 'note', 'updatedAt']);
-    if (Object.keys(r).some(k => !fields.has(k))) throw new Error('Unknown policy field');
-    for (const key of ['argDefaults', 'argLocks', 'argAllowValues']) {
-      const fields = r[key];
-      if (fields !== undefined && !object(fields)) throw new Error(`Invalid ${key}`);
-      if (object(fields)) for (const path of Object.keys(fields)) {
-        if (path.split('.').some(p => !p || forbidden.has(p))) throw new Error('Invalid policy argument path');
-      }
-    }
-    if (object(r.argAllowValues) && Object.values(r.argAllowValues).some(v => !Array.isArray(v))) throw new Error('Allow-values must be arrays');
+    if (Object.keys(r).some(k => !allowedFields.has(k))) throw new Error('Unknown policy field');
     if (r.note !== undefined && (typeof r.note !== 'string' || r.note.length > 2000)) throw new Error('Invalid policy note');
     if (r.id !== undefined && (typeof r.id !== 'string' || !/^[\w-]{1,128}$/.test(r.id))) throw new Error('Invalid policy id');
     // The scope is supplied by the authenticated API route, never by the payload.
-    return { ...r, ...scope, id: r.id ?? randomUUID(), updatedAt: Date.now() } as ToolPolicy;
+    return {
+      id: r.id ?? randomUUID(),
+      ...scope,
+      toolPattern: r.toolPattern,
+      effect: r.effect as ToolPolicy['effect'],
+      ...(r.note !== undefined ? { note: r.note } : {}),
+      updatedAt: Date.now(),
+    };
   });
 }
 /** Linear traversal without compiling caller-controlled regular expressions. */
@@ -55,23 +64,6 @@ export function toolMatches(pattern: string, name: string): boolean {
   while (pattern[i] === '*') i++;
   return i === pattern.length;
 }
-function read(args: Record<string, unknown>, path: string): unknown {
-  let v: unknown = args;
-  for (const k of path.split('.')) { if (forbidden.has(k) || !object(v) || !Object.hasOwn(v, k)) return undefined; v = v[k]; }
-  return v;
-}
-function write(args: Record<string, unknown>, path: string, value: unknown): void {
-  const keys = path.split('.'); let node = args;
-  for (const k of keys.slice(0, -1)) {
-    if (forbidden.has(k)) throw new Error('Forbidden argument path');
-    if (node[k] === undefined) node[k] = {};
-    if (!object(node[k])) throw new Error(`argument ${path} has a non-object parent`);
-    node = node[k];
-  }
-  const key = keys.at(-1)!;
-  if (forbidden.has(key)) throw new Error('Forbidden argument path');
-  node[key] = structuredClone(value);
-}
 export class ToolPolicyStore {
   private db: DatabaseSync;
   constructor(db: DatabaseSync) {
@@ -80,7 +72,7 @@ export class ToolPolicyStore {
   }
   list(scope: ToolPolicyScope): ToolPolicy[] {
     validateScope(scope);
-    return this.db.prepare('SELECT rule FROM agent_tool_policies WHERE scope_kind=? AND scope_id=? ORDER BY id').all(scope.scopeKind, scope.scopeId).map(row => JSON.parse(String(row.rule)) as ToolPolicy);
+    return this.db.prepare('SELECT rule FROM agent_tool_policies WHERE scope_kind=? AND scope_id=? ORDER BY id').all(scope.scopeKind, scope.scopeId).map(fromRow);
   }
   replace(scope: ToolPolicyScope, value: unknown): ToolPolicy[] {
     const rules = parsePolicies(value, scope);
@@ -94,7 +86,7 @@ export class ToolPolicyStore {
     } catch (e) { this.db.exec('ROLLBACK TO tool_policies; RELEASE tool_policies'); throw e; }
     return rules;
   }
-  all(): ToolPolicy[] { return this.db.prepare('SELECT rule FROM agent_tool_policies ORDER BY scope_kind, scope_id, id').all().map(row => JSON.parse(String(row.rule)) as ToolPolicy); }
+  all(): ToolPolicy[] { return this.db.prepare('SELECT rule FROM agent_tool_policies ORDER BY scope_kind, scope_id, id').all().map(fromRow); }
   active(channel: string, peer?: string): ToolPolicy[] {
     return [...this.list({ scopeKind: 'global', scopeId: '*' }), ...this.list({ scopeKind: 'channel', scopeId: channel }), ...(peer ? this.list({ scopeKind: 'peer', scopeId: peer }) : [])];
   }
@@ -102,45 +94,10 @@ export class ToolPolicyStore {
     const matches = rules.filter(r => toolMatches(r.toolPattern, tool));
     return matches.some(r => r.effect === 'deny') ? 'deny' : matches.some(r => r.effect === 'ask_owner') ? 'ask_owner' : 'allow';
   }
-  enforce(rules: ToolPolicy[], tool: string, input: unknown): { args: Record<string, unknown> } | { isError: true; text: string } {
-    const fail = (text: string) => ({ isError: true as const, text: `Policy violation: ${text}` });
-    const matching = rules.filter(r => toolMatches(r.toolPattern, tool));
-    const effect = this.effect(matching, tool);
-    if (effect === 'deny') return fail(`${tool} is denied for this peer/channel.`);
-    if (effect === 'ask_owner') return fail(`${tool} requires owner approval. Call ask_owner with the complete request instead.`);
-    try {
-      if (!object(input)) return fail('tool arguments must be an object');
-      safe(input);
-      const args = structuredClone(input);
-      for (const r of matching) for (const [path, value] of Object.entries(r.argDefaults ?? {})) if (read(args, path) === undefined) write(args, path, value);
-      // Validate all supplied values before applying locks. Defaults cannot override a lock.
-      for (const r of matching) for (const [path, value] of Object.entries(r.argLocks ?? {})) {
-        const supplied = read(input, path);
-        if (supplied !== undefined && !isDeepStrictEqual(supplied, value)) return fail(`argument ${path} is locked to ${JSON.stringify(value)} for this peer/channel.`);
-        write(args, path, value);
-      }
-      // Checking the final object catches conflicting and overlapping locks across scopes.
-      for (const r of matching) for (const [path, value] of Object.entries(r.argLocks ?? {})) if (!isDeepStrictEqual(read(args, path), value)) return fail(`conflicting locks on argument ${path}.`);
-      for (const r of matching) for (const [path, values] of Object.entries(r.argAllowValues ?? {})) if (read(args, path) === undefined || !values.some(v => isDeepStrictEqual(v, read(args, path)))) return fail(`argument ${path} must be one of ${JSON.stringify(values)} for this peer/channel.`);
-      return { args };
-    } catch (e) { return fail(e instanceof Error ? e.message : 'invalid arguments'); }
+  enforce(rules: ToolPolicy[], tool: string): { ok: true } | { isError: true; text: string } {
+    const effect = this.effect(rules, tool);
+    if (effect === 'deny') return { isError: true, text: `Policy violation: ${tool} is denied for this peer/channel.` };
+    if (effect === 'ask_owner') return { isError: true, text: `Policy violation: ${tool} requires owner approval. Call ask_owner with the complete request instead.` };
+    return { ok: true };
   }
-}
-
-/** Let the wrapper supply policy-owned fields before the MCP server validates arguments. */
-export function policyParameters(schema: object, rules: ToolPolicy[], tool: string): object {
-  const copy: unknown = structuredClone(schema);
-  if (!object(copy)) return schema;
-  for (const rule of rules.filter(r => toolMatches(r.toolPattern, tool))) {
-    for (const path of [...Object.keys(rule.argDefaults ?? {}), ...Object.keys(rule.argLocks ?? {})]) {
-      let node = copy;
-      const segments = path.split('.');
-      for (const key of segments) {
-        if (Array.isArray(node.required)) node.required = node.required.filter(v => v !== key);
-        if (!object(node.properties) || !object(node.properties[key])) break;
-        node = node.properties[key];
-      }
-    }
-  }
-  return copy;
 }

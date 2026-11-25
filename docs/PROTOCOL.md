@@ -798,13 +798,13 @@ Owner-authenticated local endpoints:
 | GET / PUT | `/api/peers/:id/tool-policies` | `{ rules: ToolPolicy[] }` |
 
 PUT atomically replaces a scope's rules. Each rule has `id` (optional on
-creation), `scopeKind`, `scopeId`, `toolPattern`, `effect`, optional
-`argDefaults`, `argLocks`, `argAllowValues`, optional `note`, and `updatedAt`.
-The server assigns scope and timestamp from the route and current time.
-`global` uses scope ID `*`. Channel and peer routes require an existing channel
-or peer. Invalid scopes, effects, paths and payloads return HTTP 400. A scope
-accepts at most 100 rules and 64 KiB of rule JSON. Patterns have at most 128
-characters; `*` is the only wildcard. Other characters match literally.
+creation), `scopeKind`, `scopeId`, `toolPattern`, `effect`, optional `note`,
+and `updatedAt`. The server assigns scope and timestamp from the route and
+current time. `global` uses scope ID `*`. Channel and peer routes require an
+existing channel or peer. Invalid scopes, effects, fields and payloads return
+HTTP 400. A scope accepts at most 100 rules and 64 KiB of rule JSON. Patterns
+have at most 128 characters; `*` is the only wildcard. Other characters match
+literally.
 
 Policies apply only to channel conversations. They never restrict the owner
 conversation. Global, channel and active asker's peer rules combine in DMs
@@ -812,21 +812,13 @@ and groups. The strictest matching effect wins: `deny`, then `ask_owner`, then
 `allow`. An allow rule does not grant a standard channel access to an otherwise
 unavailable tool. Full Trust remains subject to guardrails. Denied tools are
 hidden when known at configuration time and refused at execution; approval-gated
-tools return an error directing the agent to `ask_owner` without executing.
-
-Argument maps use dot paths. Defaults fill undefined values, in global then
-channel then peer order. Locks inject omitted values and reject conflicting
-caller values. Conflicting locks, including overlapping parent/child locks,
-fail closed. Every allowlist must accept the final value, so lists intersect.
-Equality is structural. A missing allowlisted value is an error. Paths and
-nested values cannot contain `__proto__`, `constructor` or `prototype` keys.
-The wrapper validates the resulting arguments against the original MCP schema
-before execution. Policy errors return `{ isError: true, text: "Policy violation: …" }`.
+tools return `{ isError: true, text: "Policy violation: …" }` directing the
+agent to `ask_owner` without executing.
 
 Successful PUT emits `{ type: "tool_policies", scopeKind, scopeId }` and refreshes
-affected channels immediately. Channel Settings and Peer Cards expose a Tool
-guardrails editor with matcher, effect and JSON argument maps. Rules persist in
-the module-owned SQLite `agent_tool_policies` table.
+affected channels immediately. Channel Settings and Peer Cards expose a
+tool-level Tool guardrails editor with matcher and effect. Rules persist in the
+module-owned SQLite `agent_tool_policies` table.
 
 Peer `RULES.md` applies in DMs and in ordinary groups containing that peer.
 Changing peer rules refreshes all those channels. Conversations mode excludes

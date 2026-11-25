@@ -6,34 +6,37 @@ Object.assign(globalThis,{window:win,document:win.document,Node:win.Node,HTMLEle
 const {api}=await import('../public/api.js');
 const {toolGuardrails}=await import('../public/tool-policies.js');
 const flush=()=>new Promise(r=>setImmediate(r));
-test('guardrails editor loads, edits, adds and removes generic rule constraints',async()=>{
- api.toolPolicies=async()=>({rules:[{id:'existing',toolPattern:'*delete*',effect:'deny',argLocks:{'selection.provider':'arbitrary'}}]});
+
+test('guardrails editor loads, edits, adds and removes tool-level rules without JSON fields',async()=>{
+ api.toolPolicies=async()=>({rules:[{id:'existing',toolPattern:'*delete*',effect:'deny',note:'keep me'}]});
  let saved;
  api.setToolPolicies=async(kind,id,rules)=>{saved={kind,id,rules};return {rules};};
  const root=toolGuardrails('peer','bob'); document.body.append(root); await flush();
  assert.match(root.textContent,/Tool guardrails/);
  assert.equal(root.querySelector('select').value,'deny');
- assert.match(root.querySelector('[aria-label="argLocks"]').value,/selection.provider/);
+ assert.equal(root.querySelectorAll('textarea').length,0);
+ assert.equal(root.querySelectorAll('details').length,0);
  const button=text=>[...root.querySelectorAll('button')].find(b=>b.textContent===text);
  button('Add rule').click(); assert.equal(root.querySelectorAll('fieldset').length,2);
  root.querySelectorAll('input')[1].value='mcp__any__launch';
+ root.querySelectorAll('select')[1].value='ask_owner';
  button('Remove rule').click(); button('Save guardrails').click(); await flush();
- assert.equal(saved.kind,'peer'); assert.equal(saved.rules[0].toolPattern,'mcp__any__launch');
+ assert.equal(saved.kind,'peer');
+ assert.deepEqual(saved.rules,[{toolPattern:'mcp__any__launch',effect:'ask_owner'}]);
  assert.match(root.textContent,/Guardrails saved/);
  root.remove();
 });
 
-test('blank and empty JSON maps are omitted while nonempty constraints survive', async () => {
- api.toolPolicies=async()=>({rules:[{toolPattern:'*',effect:'allow'}]});
+test('existing rule id and note round-trip cleanly on save', async () => {
+ api.toolPolicies=async()=>({rules:[{id:'r1',toolPattern:'*',effect:'allow',note:'audit note'}]});
  let saved;
  api.setToolPolicies=async(_kind,_id,rules)=>{saved=rules;return {rules};};
  const root=toolGuardrails('channel','room');document.body.append(root);await flush();
- root.querySelector('[aria-label="argDefaults"]').value=' \n ';
- root.querySelector('[aria-label="argLocks"]').value='{}';
- root.querySelector('[aria-label="argAllowValues"]').value='{"project":["one"]}';
+ root.querySelector('select').value='deny';
  [...root.querySelectorAll('button')].find(b=>b.textContent==='Save guardrails').click();await flush();
- assert.deepEqual(saved,[{toolPattern:'*',effect:'allow',argAllowValues:{project:['one']}}]);root.remove();
+ assert.deepEqual(saved,[{id:'r1',note:'audit note',toolPattern:'*',effect:'deny'}]);root.remove();
 });
+
 test('load errors replace the loading status and keep save disabled', async () => {
  api.toolPolicies=async()=>{throw new Error('offline');};
  const root=toolGuardrails('peer','bob');document.body.append(root);await flush();
