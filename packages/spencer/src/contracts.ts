@@ -1,4 +1,5 @@
 import type { Memoir } from "./memoir.ts";
+import type { WorkBriefStore } from "./work-brief.ts";
 /**
  * Internal contracts between the parts of the Spencer daemon.
  *
@@ -208,6 +209,9 @@ export interface OwnerRequest {
 
 /** A reminder an agent scheduled on itself (`schedule_followup`), see PROTOCOL.md §7.4. */
 export interface Followup {
+  watch?: boolean;
+  maxWakes?: number;
+  wakeCount?: number;
   id: string;
   /** Which conversation it wakes: the owner's, or a channel's (`ch`). */
   conversation: "owner" | "channel";
@@ -240,6 +244,8 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "typing"; ch: string; from: string; active: boolean; ts: number }
+  | { type: "work_brief" }
   | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
   | { type: "peer_bio"; ch: string; id: string; about: string | null; aboutAt: number | null }
@@ -394,6 +400,7 @@ export interface OutgoingChat {
 
 /** What the agent layer needs from the core. */
 export interface CoreServices {
+  workBrief?: WorkBriefStore;
   memoir: Memoir;
   bio(): BioStatus;
   bioText(): string;
@@ -435,6 +442,7 @@ export interface CoreServices {
   ): { id: string };
   requestFileSend(ch: string, req: TransferRequest): Promise<Transfer>;
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
+  sendTyping(ch: string, active: boolean): void;
   sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
   createInvite(kind: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;

@@ -16,6 +16,8 @@ import {
   upsertFollowup,
   setConversation,
   setWorking,
+  setTyping,
+  clearTyping,
   clearWorkingFor,
   setOwner,
   setOwnerBusy,
@@ -321,10 +323,14 @@ function handleEvent(ev) {
         const acknowledged = previous && Number.isSafeInteger(ev.message.seq) && previous.seq !== ev.message.seq;
         const outOfOrderReplay = !previous && Number.isSafeInteger(ev.message.seq) && ev.message.seq < maxSeq;
         upsertMessage(ev.ch, ev.message);
+        if (ev.message.type === "chat" && ev.message.by === "human") clearTyping(ev.ch, ev.message.from);
         if (acknowledged || outOfOrderReplay) void refreshLoadedMessageWindow(ev.ch);
         // The reply landed: whoever was "working" on it is done.
         if (ev.message.type === "chat" && ev.message.replyTo) clearWorkingFor(ev.ch, ev.message.from, ev.message.replyTo);
       }
+      break;
+    case "typing":
+      if (ev.ch && ev.from) setTyping(ev);
       break;
     case "status":
       if (ev.ch && ev.from && ev.replyTo) setWorking(ev);

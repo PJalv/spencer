@@ -12,6 +12,10 @@
  * Presence follows PROTOCOL §8: `member.presence = "online"|"offline"|"unknown"` and `member.lastSeen`, plus
  * `{type:"presence", ch, id, presence, lastSeen}` events (one per channel the member is in).
  */
+import { DatabaseSync } from "node:sqlite";
+import { WorkBriefStore, validateWorkBriefPublish, workBriefVisibility } from "../../spencer/src/work-brief.ts";
+import { wrapUntrustedNote } from "../../spencer/src/agent/untrusted.ts";
+import { UserError } from "../../spencer/src/channels.ts";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
@@ -716,11 +720,31 @@ function memoirProfile(kind: string, id: string) {
     rules:memoirRules.get(key) ?? "", maxRulesBytes:2048,notes:memoirNotes.get(key) ?? [],
     channels:shared.map(c=>({id:c.id,name:c.name,kind:c.kind,about:"I help with planning and research.",aboutAt:mockPeerAboutAt}))};
 }
+const workBrief = new WorkBriefStore(new DatabaseSync(":memory:"), () => emit({type: "work_brief"}));
 async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["api", ...]
   const [, a, b, c, d] = parts;
 
+  if (a === "work-brief") {
+    if (!b && method === "GET") return { items: workBrief.list({ visibility: url.searchParams.get("visibility") || undefined, status: url.searchParams.get("status") || undefined, project: url.searchParams.get("project") || undefined }) };
+    if ((!b || b === "publish") && method === "POST") {
+      const body = await readJson(req);
+      validateWorkBriefPublish(body);
+      const ch = typeof body.notifyChannel === "string" ? channels.get(body.notifyChannel) : undefined;
+      if (body.notifyChannel !== undefined && !ch) throw new HttpError(400, "notifyChannel must be a known channel id");
+      const visibility = workBriefVisibility(body.visibility, typeof body.key === "string" ? workBrief.list().find(i => i.key === body.key)?.visibility : undefined);
+      if (ch && (ch.mode === "conversation" || visibility === "private" || (visibility === "trusted" && ch.trust !== "full"))) throw new HttpError(403, "item visibility does not permit this channel");
+      const item = workBrief.upsert(body);
+      const text = `${item.title}: ${item.summary}`;
+      if (body.wakeOwner) emitOwner(addOwner({ role: "user", text: wrapUntrustedNote(JSON.stringify({ title: item.title, summary: item.summary, source: item.source, links: item.links })) }));
+      else if (body.notifyOwner) emitOwner(addOwner({ role: "note", text, untrusted: true }));
+      if (ch) { const message = addMsg(ch.id, me, { text, by: "human", final: body.final === true }); emit({ type: "message", ch: ch.id, message }); }
+      return item;
+    }
+    if (b && method === "PATCH") return workBrief.upsert(await readJson(req), b);
+    if (b && method === "DELETE") { workBrief.delete(b); return {}; }
+  }
   if (a === "peers" && b && c === "memoir" && d === "seen" && parts.length === 5 && method === "POST") {
     const profile = memoirProfile("peer", b);
     profile.notes.forEach((n) => (n.seen = true));
@@ -865,6 +889,11 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
         emit({ type: "conversation", conversation: st });
         return st;
       }
+    }
+    if (c === "typing" && method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.active !== "boolean") throw new HttpError(400, "active must be a boolean");
+      return {};
     }
     if (c === "messages") {
       if (method === "GET") {
@@ -1243,7 +1272,7 @@ const server = createServer(async (req, res) => {
       await new Promise((r) => setTimeout(r, 120));
       send(res, 200, out);
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = err instanceof HttpError || err instanceof UserError ? err.status : 500;
       send(res, status, { error: err instanceof Error ? err.message : String(err) });
     }
     return;

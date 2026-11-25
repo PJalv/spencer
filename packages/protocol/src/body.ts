@@ -84,7 +84,8 @@ export type LinkBody = LinkOfferBody | LinkAnswerBody | LinkCloseBody;
 export const LINK_BODY_TYPES = new Set(["link_offer", "link_answer", "link_close"]);
 export function isLinkBody(b: Body): b is LinkBody { return LINK_BODY_TYPES.has(b.type); }
 
-export type Body = HelloBody | ChatBody | FileBody | StatusBody | LinkBody;
+export type TypingBody = { type: "typing"; active: boolean };
+export type Body = HelloBody | ChatBody | FileBody | StatusBody | TypingBody | LinkBody;
 
 export const FILE_BODY_TYPES = new Set([
   "file_offer",
@@ -120,6 +121,8 @@ export function parseBody(raw: unknown): Body | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const b = raw as Record<string, unknown>;
   switch (b.type) {
+    case "typing":
+      return typeof b.active === "boolean" ? { type: "typing", active: b.active } : null;
     case "hello":
       if (!isStr(b.name, 200) || !isStr(b.agent, 100)) return null;
       if (b.about !== undefined && !isStr(b.about, MAX_ABOUT)) return null;

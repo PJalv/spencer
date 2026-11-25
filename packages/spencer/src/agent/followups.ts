@@ -5,7 +5,7 @@
  * Stored in core.db (`agent_followups`), so they survive restarts. This module is the store and the timer; the agent
  * decides what firing means (a run in the owner or channel conversation, then a channel message). Delivery is
  * exactly-once with the same pattern as replies: `pending → fired` is one conditional UPDATE, the run is submitted with
- * `requestId = "followup:" + id`, and a channel message is enqueued with `idempotencyKey = "followup:" + id`.
+ * `requestId = "followup:" + id + ":w" + wake_count`, and a channel message is enqueued with `idempotencyKey = "followup:" + id`.
  *
  * Timer: wall-clock based. The timer wakes at most every `maxSleepMs` and compares `due_at` with `Date.now()`, because
  * Node timers run on a monotonic clock that stops while a laptop sleeps: a plain 30-minute setTimeout armed before a
@@ -27,6 +27,14 @@ export interface FollowupRow {
   due_at: number;
   /** Owner follow-ups: fire early when a peer writes in this channel. */
   wake_ch: string | null;
+  watch: number;
+  max_wakes: number;
+  wake_count: number;
+  last_msg_final: number;
+  wake_text: string | null;
+  task_notified: number;
+  task_ch: string | null;
+  task_msg_id: string | null;
   /** 0: scheduled by an ordinary run; n: by the run of a follow-up of depth n-1. */
   depth: number;
   /** Channel follow-ups: hop, the message it continues, and who to mention (groups). */
@@ -49,6 +57,10 @@ export interface NewFollowup {
   note: string;
   dueAt: number;
   wakeCh?: string;
+  watch?: boolean;
+  maxWakes?: number;
+  taskCh?: string;
+  taskMsgId?: string;
   depth: number;
   hop?: number;
   replyTo?: string;
@@ -104,6 +116,19 @@ export class FollowupStore {
       fired_at INTEGER,
       updated_at INTEGER NOT NULL
     )`);
+    const columns = new Set((this.db.prepare("PRAGMA table_info(agent_followups)").all() as { name: string }[]).map((c) => c.name));
+    for (const [name, type] of Object.entries({
+      watch: "INTEGER NOT NULL DEFAULT 0", max_wakes: "INTEGER NOT NULL DEFAULT 5",
+      wake_count: "INTEGER NOT NULL DEFAULT 0", last_msg_final: "INTEGER NOT NULL DEFAULT 0",
+      task_ch: "TEXT", task_msg_id: "TEXT", wake_text: "TEXT", task_notified: "INTEGER NOT NULL DEFAULT 0",
+    })) {
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE agent_followups ADD COLUMN ${name} ${type}`);
+    }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS agent_watch_updates (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, followup_id TEXT NOT NULL,
+      msg_id TEXT NOT NULL, content TEXT NOT NULL, final INTEGER NOT NULL, claimed INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(followup_id, msg_id)
+    )`);
     this.db.exec("CREATE INDEX IF NOT EXISTS agent_followups_state ON agent_followups (state, due_at)");
   }
 
@@ -143,8 +168,47 @@ export class FollowupStore {
   /** Owner follow-ups waiting for a peer to write in `ch`. */
   waitingOn(ch: string): FollowupRow[] {
     return this.db
-      .prepare("SELECT * FROM agent_followups WHERE state = 'pending' AND wake_ch = ? ORDER BY due_at")
+      .prepare("SELECT * FROM agent_followups WHERE (state = 'pending' OR (state = 'fired' AND watch = 1)) AND wake_ch = ? ORDER BY due_at")
       .all(ch) as unknown as FollowupRow[];
+  }
+
+  enqueueUpdate(id: string, msgId: string, content: string, final: boolean): boolean {
+    return !!this.db.prepare(`INSERT OR IGNORE INTO agent_watch_updates (followup_id, msg_id, content, final)
+      SELECT id, ?, ?, ? FROM agent_followups
+      WHERE id = ? AND watch = 1 AND state IN ('pending', 'fired') AND due_at > ?`)
+      .run(msgId, content, final ? 1 : 0, id, this.now()).changes;
+  }
+
+  /** Claim the next update and its wake number together, so restart cannot lose or repeat a wake. */
+  claimUpdate(id: string): FollowupRow | undefined {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const next = this.db.prepare("SELECT seq, content, final FROM agent_watch_updates WHERE followup_id = ? AND claimed = 0 ORDER BY seq LIMIT 1")
+        .get(id) as { seq: number; content: string; final: number } | undefined;
+      if (!next || !this.markFired(id, "reply", !!next.final)) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+      this.db.prepare("UPDATE agent_followups SET wake_text = ? WHERE id = ?").run(next.content, id);
+      this.db.prepare("UPDATE agent_watch_updates SET claimed = 1 WHERE seq = ?").run(next.seq);
+      this.db.exec("COMMIT");
+      return this.get(id);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  pendingWatches(): FollowupRow[] {
+    return this.db.prepare("SELECT * FROM agent_followups WHERE watch = 1 AND state = 'pending'").all() as unknown as FollowupRow[];
+  }
+
+  unnotifiedTasks(): FollowupRow[] {
+    return this.db.prepare("SELECT * FROM agent_followups WHERE task_ch IS NOT NULL AND task_notified = 0 AND state IN ('done', 'failed', 'cancelled')").all() as unknown as FollowupRow[];
+  }
+
+  taskNotified(ch: string, msgId: string): void {
+    this.db.prepare("UPDATE agent_followups SET task_notified = 1 WHERE task_ch = ? AND task_msg_id = ?").run(ch, msgId);
   }
 
   /** Fired but not finished (a run in flight, or a crash before it finished). */
@@ -170,24 +234,39 @@ export class FollowupStore {
     const now = this.now();
     this.db
       .prepare(
-        `INSERT INTO agent_followups (id, conv, ch, note, due_at, wake_ch, depth, hop, reply_to, to_id, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        `INSERT INTO agent_followups (id, conv, ch, note, due_at, wake_ch, depth, hop, reply_to, to_id, state, created_at, updated_at, watch, max_wakes, task_ch, task_msg_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, f.conv, f.ch ?? null, f.note, f.dueAt, f.wakeCh ?? null, f.depth, f.hop ?? 0, f.replyTo ?? null, f.toId ?? null, now, now);
+      .run(id, f.conv, f.ch ?? null, f.note, f.dueAt, f.wakeCh ?? null, f.depth, f.hop ?? 0, f.replyTo ?? null, f.toId ?? null, now, now, f.watch ? 1 : 0, f.maxWakes ?? 5, f.taskCh ?? null, f.taskMsgId ?? null);
     this.changed(id);
     this.arm();
     return this.get(id)!;
   }
 
   /** `pending → fired`; false when it was not pending (already fired or cancelled). */
-  markFired(id: string, by: "time" | "reply"): boolean {
+  markFired(id: string, by: "time" | "reply", final = false): boolean {
     const now = this.now();
     const r = this.db
-      .prepare("UPDATE agent_followups SET state = 'fired', fired_by = ?, fired_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'")
-      .run(by, now, now, id);
+      .prepare("UPDATE agent_followups SET state = 'fired', fired_by = ?, fired_at = ?, updated_at = ?, last_msg_final = ?, wake_count = wake_count + 1 WHERE id = ? AND state = 'pending'")
+      .run(by, now, now, final ? 1 : 0, id);
     if (Number(r.changes) === 0) return false;
     this.changed(id);
     return true;
+  }
+
+  rearm(id: string): boolean {
+    const r = this.db.prepare(`UPDATE agent_followups SET state = 'pending', submission_id = NULL
+      WHERE id = ? AND state = 'fired' AND watch = 1 AND fired_by = 'reply'
+      AND last_msg_final = 0 AND wake_count < max_wakes AND due_at > ?`).run(id, this.now());
+    if (!r.changes) return false;
+    this.changed(id);
+    this.arm();
+    return true;
+  }
+
+  linkedTask(ch: string, msgId: string): FollowupRow[] {
+    return this.db.prepare("SELECT * FROM agent_followups WHERE task_ch = ? AND task_msg_id = ? AND state IN ('pending', 'fired')")
+      .all(ch, msgId) as unknown as FollowupRow[];
   }
 
   setSubmission(id: string, submissionId: string): void {
@@ -200,6 +279,7 @@ export class FollowupStore {
       .prepare("UPDATE agent_followups SET state = ?, error = ?, updated_at = ? WHERE id = ? AND state IN ('pending', 'fired')")
       .run(state, error?.slice(0, 500) ?? null, this.now(), id);
     if (Number(r.changes) === 0) return false;
+    this.db.prepare("DELETE FROM agent_watch_updates WHERE followup_id = ?").run(id);
     this.changed(id);
     this.arm();
     return true;
@@ -273,6 +353,9 @@ export function toFollowup(r: FollowupRow): Followup {
     ...(r.wake_ch ? { wakeOnReplyIn: r.wake_ch } : {}),
     state: r.state === "fired" ? "running" : r.state,
     depth: r.depth,
+    watch: !!r.watch,
+    maxWakes: r.max_wakes,
+    wakeCount: r.wake_count,
     createdAt: r.created_at,
     ...(r.fired_at ? { firedAt: r.fired_at } : {}),
     ...(r.fired_by === "time" || r.fired_by === "reply" ? { firedBy: r.fired_by } : {}),

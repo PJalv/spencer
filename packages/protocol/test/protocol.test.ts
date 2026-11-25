@@ -226,3 +226,10 @@ test("link bodies, features, encryption and relay URL", async () => {
   assert.equal(normalizeRelayUrl("http://example.com/relay/ws/"), "ws://example.com/relay/ws");
   for (const url of ["bad", "ftp://x", "ws://u:p@x", "ws://x/?a", "ws://x/#a"]) assert.throws(() => normalizeRelayUrl(url));
 });
+
+test("parseBody validates typing", () => {
+  assert.deepEqual(parseBody({ type: "typing", active: true }), { type: "typing", active: true });
+  assert.deepEqual(parseBody({ type: "typing", active: false }), { type: "typing", active: false });
+  assert.equal(parseBody({ type: "typing", active: 1 }), null);
+  assert.equal(parseBody({ type: "typing" }), null);
+});

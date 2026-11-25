@@ -191,7 +191,7 @@ function afterTool(result: Message & { role: "toolResult" }, messages: readonly 
     const args = findCallArgs(messages, result.toolCallId);
     return text(`Asked my owner to approve sending ${String(args?.path ?? "the file")}`);
   }
-  if (channel && result.toolName === "ask_owner") return text("Waiting for my owner's approval");
+  if (channel && result.toolName === "ask_owner") return text("Waiting for my owner's approval\n[END]");
   if (channel && result.toolName === "schedule_followup") {
     return text(result.isError ? `could not schedule: ${out.slice(0, 200)}` : "I'll get back to you");
   }
@@ -231,6 +231,10 @@ function head(s: string): [string, string] {
 function ownerAnswer(input: string): AssistantMessage {
   const fu = followupNote(input);
   if (fu !== undefined) return ownerAnswer(fu);
+  if (input.startsWith("I approve this request from ")) {
+    const command = input.split("\n\n")[1];
+    if (command) return ownerAnswer(command);
+  }
   const t = input.trim();
   const [cmd, rest] = head(t);
   switch (cmd) {
