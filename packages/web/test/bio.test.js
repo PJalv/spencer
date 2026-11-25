@@ -22,7 +22,7 @@ api.peers = async () => ({ peers: [peer] });
 api.memoir = async () => ({...peer,bio:peer.about,rules:"",notes:[]});
 api.mcp = async () => ({ servers: [] });
 
-test("Bio route works without Experimental; editor counts UTF-16 and saves/reverts", async () => {
+test("Bio route is a clean raw markdown editor without Work Brief clutter and saves/reverts", async () => {
   S.experimental = false;
   assert.deepEqual(parseHash("#/bio"), { name: "bio" });
   assert.equal(hashFor({ name: "peers" }), "#/peers");
@@ -31,7 +31,8 @@ test("Bio route works without Experimental; editor counts UTF-16 and saves/rever
   api.setBio = async text => status = { ...status, text: text.trim() };
   const main = mount(); const view = bioView(main); await flush();
   assert.match(main.textContent, /never put secrets, private IPs, or sensitive paths/);
-  assert.match(main.textContent, /Team · direct · standard/);
+  assert.match(main.textContent, /shared with your channels by default/i);
+  assert.doesNotMatch(main.textContent, /Work Brief|Add work item/);
   button(main, "Start from a template").click();
   const editor = main.querySelector("textarea");
   assert.match(editor.value, /Who I am[\s\S]*What I can help with[\s\S]*How to ask me[\s\S]*What I won't do/);
@@ -44,26 +45,35 @@ test("Bio route works without Experimental; editor counts UTF-16 and saves/rever
   view.destroy();
 });
 
-test("Peers directory renders safe markdown and updates from peer_bio events", async () => {
+test("Peers directory aligns inside page-body, hides peer BIO.md, and opens Memoir", async () => {
   const main = mount(); const view = peersView(main); await flush();
-  assert.match(main.textContent, /Public bio/); assert.match(main.textContent, /Team/);
+  assert.ok(main.querySelector(".page-body"));
+  assert.match(main.textContent, /Bob/); assert.match(main.textContent, /Team/);
+  assert.doesNotMatch(main.textContent, /Public bio|No bio shared yet|BIO\.md/);
   assert.equal(main.querySelector("script"), null);
   assert.ok(main.querySelector("h1"));
-  applyBioEvent({ type: "peer_bio", ch: c.id, id: "bob", about: "Updated", aboutAt: 2 }); await flush();
-  button(main, "Open Peer Card").click(); await flush();
-  assert.match(document.querySelector('[role="dialog"]').textContent, /Peer Card/);
+  button(main, "Show Memoir").click(); await flush();
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent, /Memoir/);
+  assert.doesNotMatch(dialog.textContent, /Their BIO\.md|Public bio|Peer Card/);
   closeModal(); view.destroy();
 });
 
-test("DM Peer BIO snippet, peer row cards, channel-specific bio, and share toggle", async () => {
+test("DM sidebar shows Memoir without exposing peer BIO, and Channel settings defaults Share my Bio on", async () => {
   const main = mount(); S.channels.set(c.id, c); S.messages.set(c.id, []);
   S.peerBios.clear(); const view = channelView(main, c.id); await flush();
-  assert.match(main.querySelector(".members").textContent, /Bio & Memoir[\s\S]*Channel-specific scope/);
+  const sidebarText = main.querySelector(".members").textContent;
+  assert.match(sidebarText, /Memoir[\s\S]*Show Memoir/);
+  assert.doesNotMatch(sidebarText, /Bio & Memoir|Channel-specific scope|No bio shared yet|Open Peer Card/);
   main.querySelector(".member[role=button]").click(); await flush();
-  assert.match(document.querySelector('[role="dialog"]').textContent, /Channel-specific scope/); closeModal();
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent, /Memoir/);
+  assert.doesNotMatch(dialog.textContent, /Channel-specific scope|Their BIO\.md/);
+  closeModal();
   const settings = button(main, "Channel settings"); settings.click(); await flush();
-  const row = [...document.querySelectorAll("label.switch-row")].find(l => l.textContent.includes("Share my BIO"));
-  assert.ok(row); assert.match(row.textContent, /older copy/);
+  const row = [...document.querySelectorAll("label.switch-row")].find(l => l.textContent.includes("Share my Bio"));
+  assert.ok(row); assert.equal(row.querySelector("input").checked, true);
+  assert.match(row.textContent, /older copy/);
   row.querySelector("input").checked = false;
   let patch;
   api.patchChannel = async (_ch, data) => { patch = data; return { ...c, ...data }; };
@@ -71,35 +81,13 @@ test("DM Peer BIO snippet, peer row cards, channel-specific bio, and share toggl
   assert.equal(patch.shareBio, false); view.destroy();
 });
 
-test("group peer row opens its channel BIO without a DM snippet", async () => {
+test("group sidebar shows Group Memoir with Show Memoir and peer rows open peer Memoir without BIO", async () => {
   const main = mount();
   S.channels.set(c.id, { ...c, kind: "group" }); S.messages.set(c.id, []);
   const view = channelView(main, c.id); await flush();
+  assert.ok(button(main, "Show Memoir"));
   assert.equal(button(main, "Open Peer Card"), undefined);
   main.querySelector(".member[role=button]").click(); await flush();
-  assert.match(document.querySelector('[role="dialog"]').textContent, /Channel-specific scope/);
+  assert.doesNotMatch(document.querySelector('[role="dialog"]').textContent, /Channel-specific scope|Their BIO\.md/);
   closeModal(); view.destroy();
-});
-
-test("Work Brief submission preserves in-flight edits and prevents duplicate submits", async () => {
-  api.bio = async () => ({text:"", sharedChannels:[]});
-  api.workBrief = async () => ({items:[]});
-  let finish; const calls = [];
-  api.addWorkBrief = item => { calls.push(item); return new Promise(resolve => { finish = resolve; }); };
-  const main = mount(); const view = bioView(main); await flush();
-  try {
-    const title = main.querySelector('[aria-label="Work title"]');
-    const summary = main.querySelector('[aria-label="Work summary"]');
-    const submit = button(main, "Add work item");
-    title.value = 'submitted title'; summary.value = 'submitted summary';
-    submit.click(); submit.click();
-    assert.equal(submit.disabled, true);
-    assert.equal(calls.length, 1);
-    title.value = 'next title'; summary.value = 'next summary';
-    finish({id:'new'}); await flush();
-    assert.equal(title.value, 'next title'); assert.equal(summary.value, 'next summary');
-    assert.equal(submit.disabled, false);
-    submit.click(); finish({id:'second'}); await flush();
-    assert.equal(title.value, ''); assert.equal(summary.value, '');
-  } finally { view.destroy(); }
 });

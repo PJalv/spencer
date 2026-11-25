@@ -82,16 +82,13 @@ function reset() {
   };
 }
 
-test("Peer Card safely renders BIO and notes, marks seen, validates byte count and saves/reverts rules", async () => {
+test("Memoir hides peer BIO, safely renders notes, marks seen, validates byte count and saves/reverts rules", async () => {
   mount();
   reset();
   memoirModal("peer", "bob");
   await flush();
   const dialog = document.querySelector('[role="dialog"]');
-  assert.match(
-    dialog.textContent,
-    /Their BIO.md[\s\S]*Peer-authored \/ untrusted/,
-  );
+  assert.doesNotMatch(dialog.textContent, /Their BIO\.md|Peer-authored/);
   assert.equal(dialog.querySelector("script"), null);
   assert.equal(dialog.querySelector("system"), null);
   assert.match(
@@ -120,12 +117,12 @@ test("Group Memoir supports Add, Pin/Unpin and Delete, and sidebar summary opens
   reset();
   main.append(groupMemoirSnippet({ id: "team", mode: "chat" }));
   await flush();
-  assert.match(main.textContent, /Group Memoir[\s\S]*Rules saved · 1 notes/);
-  button(main, "Open Group Memoir").click();
+  assert.match(main.textContent, /Group Memoir[\s\S]*Rules saved · 1 note/);
+  button(main, "Show Memoir").click();
   await flush();
   let dialog = document.querySelector('[role="dialog"]');
   assert.match(dialog.textContent, /group only/);
-  assert.doesNotMatch(dialog.textContent, /Their BIO.md/);
+  assert.doesNotMatch(dialog.textContent, /Their BIO\.md/);
   button(dialog, "Pin").click();
   await flush();
   await flush();
@@ -178,7 +175,7 @@ test("inactive directory, unseen badge counts and debounced memoir refresh", asy
   await flush();
   assert.match(
     main.textContent,
-    /Inactive peers[\s\S]*Rules saved · 1 notes · 2 unseen/,
+    /Inactive peers[\s\S]*Rules saved · 1 note · 2 unseen/,
   );
   assert.equal(
     unseenMemoirCount([{ unseenNotes: 2 }, { unseenNotes: 3 }, {}]),

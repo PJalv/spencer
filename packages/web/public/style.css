@@ -3449,10 +3449,58 @@ details[open] > summary > .icon:last-child,
   font-size: 13.5px;
 }
 
-.peer-directory { display: grid; gap: 24px; padding: 24px; max-width: 980px; }
-.peer-card { padding: 24px; border: 1px solid var(--border); border-radius: 12px; overflow-wrap: anywhere; }
-.peer-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.peer-bio { padding: 12px; overflow-wrap: anywhere; }
+.peer-directory {
+  display: grid;
+  gap: 10px;
+}
+.peer-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  overflow-wrap: anywhere;
+}
+.peer-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.peer-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.peer-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.peer-channels {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.peer-summary {
+  font-size: 12.5px;
+}
+.peer-inactive-title {
+  margin-top: 18px;
+}
+.peer-card > .btn {
+  flex: none;
+}
+@media (max-width: 560px) {
+  .peer-card {
+    flex-wrap: wrap;
+  }
+  .peer-card > .btn {
+    width: 100%;
+  }
+}
 .member[role="button"] { cursor: pointer; }
 
 .typing-bar { color: var(--muted, #777); font-size: 12px; min-height: 0; }
@@ -3486,69 +3534,45 @@ details[open] > summary > .icon:last-child,
   background: var(--raised);
 }
 
-/* Global Work Brief (Bio page) */
-.wb-section {
-  margin-top: 28px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line);
-  display: grid;
-  gap: 14px;
-}
-.wb-head { display: grid; gap: 4px; }
-.wb-form {
-  display: grid;
-  gap: 10px;
-  padding: 16px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
-}
-.wb-form-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.wb-select { width: auto; min-width: 120px; }
-.wb-list { display: grid; gap: 10px; }
-.wb-card {
-  display: grid;
-  gap: 10px;
-  padding: 14px 16px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
-}
-.wb-card[data-status="done"] { opacity: 0.72; }
-.wb-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.wb-title { font-size: 15px; font-weight: 600; color: var(--ink); }
-.wb-summary { font-size: 14px; line-height: 1.5; color: var(--ink-2); }
-.wb-card-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-/* Peer Card / Group Memoir & MCP Tool Guardrails */
+/* Memoir & MCP Tool Guardrails */
 .memoir-body { display: grid; gap: 18px; }
 .memoir-head { display: grid; gap: 6px; }
 .memoir-head code { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
 .memoir-section {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
 .memoir-rules { width: 100%; min-height: 110px; }
 .memoir-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .memoir-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.memoir-notes-list { display: grid; gap: 8px; }
+.memoir-note {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  overflow-wrap: anywhere;
+}
+.memoir-note-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.memoir-note-text {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.memoir-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .memoir-add-form { display: flex; align-items: center; gap: 8px; }
 .memoir-add-form .input { flex: 1; }
 

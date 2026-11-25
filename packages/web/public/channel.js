@@ -425,7 +425,7 @@ function settingsModal(c) {
     S.p2p?.crashDisabled?.[c.id] ? h("button.btn", { type: "button", on: { click: async (event) => { const button = event.currentTarget; const status = await attempt(() => api.resetP2p(c.id)); if (status) { S.p2p = { ...S.p2p, ...status }; button.remove(); toast("Direct links re-enabled"); } } } }, "Re-enable direct links") : null,
     S.p2p?.mode === "off" ? h("span.hint.block", null, `Direct file transfers are currently disabled in Spencer's config (p2p.mode = "off").`) : null,
     h("label.switch-row", null, allowLocal, h("span", null, h("strong", null, "Allow local network addresses"), h("span.hint.block", null, "Share local LAN addresses in this channel for faster transfers between machines on the same Wi-Fi or network."))),
-    h("label.switch-row", null, shareBio, h("span", null, "Share my BIO in this channel", h("span.hint.block", null, "Turning this off clears it for peers going forward. Peers may already have an older copy."))),
+    h("label.switch-row", null, shareBio, h("span", null, h("strong", null, "Share my Bio in this channel"), h("span.hint.block", null, "On by default so peers' Spencers know your scope. Turning this off clears it going forward; peers' Spencers may still have an older copy."))),
     field("Name", name, c.kind === "direct" ? "Your private label for this channel. Peers don't see it." : "Your label for this group."),
     h(
       "label.switch-row",
@@ -1136,17 +1136,8 @@ export function channelView(main, chId) {
     renderMembers(); // "seen 5m ago" ages
     if (workingIn(chId).length) renderWorking();
   }, 15_000);
-  attempt(() => api.peers()).then(result => {
-    if (!result || !main.isConnected) return;
-    for (const p of result.peers) for (const ch of p.channels) {
-      if (!S.peerBios.has(ch.id)) S.peerBios.set(ch.id, new Map());
-      if (!S.peerBios.get(ch.id).has(p.id) || (ch.aboutAt ?? 0) > (S.peerBios.get(ch.id).get(p.id).aboutAt ?? 0)) S.peerBios.get(ch.id).set(p.id, ch);
-    }
-    renderMembers();
-  });
   const offs = [
     on("memoir", () => renderMembers()),
-    on("peer_bio", ev => { if (ev.ch === chId) renderMembers(); }),
     on(`channel:${chId}`, onChannel),
     on(`messages:${chId}`, onMessages),
     on("transfers", onTransfer),

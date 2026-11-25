@@ -1,7 +1,6 @@
 import { toolGuardrails } from "./tool-policies.js";
-import { h } from "./dom.js";
+import { h, icon } from "./dom.js";
 import { api, attempt } from "./api.js";
-import { markdown } from "./md.js";
 import { openModal } from "./modal.js";
 import { on } from "./state.js";
 
@@ -9,9 +8,10 @@ export function unseenMemoirCount(peers) {
   return peers.reduce((n, p) => n + (p.unseenNotes ?? 0), 0);
 }
 export function memoirSummary(p) {
-  return `${p.hasRules || p.rules ? "Rules saved" : "No rules"} · ${p.noteCount ?? p.notes?.length ?? 0} notes${p.unseenNotes ? ` · ${p.unseenNotes} unseen` : ""}`;
+  const count = p.noteCount ?? p.notes?.length ?? 0;
+  return `${p.hasRules || p.rules ? "Rules saved" : "No rules"} · ${count} ${count === 1 ? "note" : "notes"}${p.unseenNotes ? ` · ${p.unseenNotes} unseen` : ""}`;
 }
-export function memoirModal(kind, id, ch) {
+export function memoirModal(kind, id) {
   const body = h("div.memoir-body", null, "Loading…");
   let closed = false,
     seq = 0,
@@ -24,7 +24,7 @@ export function memoirModal(kind, id, ch) {
     first = true;
   const offs = [];
   const modal = openModal({
-    title: kind === "peer" ? "Peer Card" : "Group Memoir",
+    title: kind === "peer" ? "Memoir" : "Group Memoir",
     wide: true,
     body,
     onClose() {
@@ -178,70 +178,64 @@ export function memoirModal(kind, id, ch) {
       rules.value = lastRules;
     }
     updateCount();
-    const channelBio = ch ? p.channels?.find((c) => c.id === ch) : null;
-    const bio = channelBio ? channelBio.about : p.bio;
     headerSlot.replaceChildren(
       h("h2", null, p.name ?? "Peer"),
       h("code", null, p.fingerprint ?? p.ch ?? id),
-      ...(kind === "peer"
-        ? [
-            h("h3", null, "Their BIO.md"),
-            h("p.hint", null, "Peer-authored / untrusted"),
-            h(
-              "div.markdown",
-              null,
-              bio
-                ? markdown(bio, undefined, { htmlPreview: false })
-                : "No bio shared yet",
-            ),
-          ]
-        : []),
     );
     notesList.replaceChildren(
-      ...p.notes.map((n) =>
-        h(
-          "article.memoir-note",
-          null,
-          h("span.pill", null, n.author === "owner" ? "You" : "Agent"),
-          " ",
-          h(
-            "span.hint",
-            null,
-            `${n.trustAtWrite ?? "unknown"} · ${new Date(n.createdAt).toLocaleString()}`,
-          ),
-          h("p", null, n.text),
-          h(
-            "button.btn.sm",
-            {
-              type: "button",
-              on: {
-                click: async () => {
-                  if (
-                    await attempt(() =>
-                      api.patchMemoirNote(n.id, { pinned: !n.pinned }),
-                    )
-                  )
-                    void load();
-                },
-              },
-            },
-            n.pinned ? "Unpin" : "Pin",
-          ),
-          h(
-            "button.btn.sm",
-            {
-              type: "button",
-              on: {
-                click: async () => {
-                  if (await attempt(() => api.deleteMemoirNote(n.id)))
-                    void load();
-                },
-              },
-            },
-            "Delete",
-          ),
-        ),
-      ),
+      ...(p.notes.length
+        ? p.notes.map((n) =>
+            h(
+              "article.memoir-note",
+              null,
+              h(
+                "div.memoir-note-head",
+                null,
+                h("span.pill", null, n.author === "owner" ? "You" : "Agent"),
+                h(
+                  "span.hint",
+                  null,
+                  `${n.trustAtWrite ?? "unknown"} · ${new Date(n.createdAt).toLocaleString()}`,
+                ),
+              ),
+              h("p.memoir-note-text", null, n.text),
+              h(
+                "div.memoir-note-actions",
+                null,
+                h(
+                  "button.btn.sm",
+                  {
+                    type: "button",
+                    on: {
+                      click: async () => {
+                        if (
+                          await attempt(() =>
+                            api.patchMemoirNote(n.id, { pinned: !n.pinned }),
+                          )
+                        )
+                          void load();
+                      },
+                    },
+                  },
+                  n.pinned ? "Unpin" : "Pin",
+                ),
+                h(
+                  "button.btn.sm",
+                  {
+                    type: "button",
+                    on: {
+                      click: async () => {
+                        if (await attempt(() => api.deleteMemoirNote(n.id)))
+                          void load();
+                      },
+                    },
+                  },
+                  "Delete",
+                ),
+              ),
+            ),
+          )
+        : [h("p.hint", null, "No notes yet.")]),
     );
   };
   const schedule = () => {
@@ -252,9 +246,6 @@ export function memoirModal(kind, id, ch) {
   offs.push(
     on("memoir", (e) => {
       if (e.scopeKind === kind && e.scopeId === id) schedule();
-    }),
-    on("peer_bio", (e) => {
-      if (kind === "peer" && e.id === id) schedule();
     }),
   );
   void load();
@@ -268,14 +259,14 @@ export function groupMemoirSnippet(c) {
     if (p) summary.textContent = memoirSummary(p);
   });
   return h(
-    "section.peer-bio",
-    null,
-    h("h3", null, "Group Memoir"),
-    summary,
+    "section.access",
+    { "aria-label": "Group Memoir" },
+    h("h2", null, "Group Memoir"),
+    h("div.access-row", null, icon("file", 15), h("div", null, h("strong", null, "Rules & notes"), summary)),
     h(
       "button.btn.sm",
       { type: "button", on: { click: () => groupMemoir(c.id) } },
-      "Open Group Memoir",
+      "Show Memoir",
     ),
   );
 }

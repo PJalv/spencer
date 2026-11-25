@@ -723,7 +723,7 @@ The data dir is mode 0700. Secrets and databases in it (`identity.json`, `api-to
 
 ### Public BIO and peer discovery
 
-BIO is a core feature. `SOUL.md` remains private and experimental. The Bio page publishes the owner's scope. The Peers page and channel Peer Cards display received biographies as safe Markdown.
+BIO is a core feature. `SOUL.md` remains private and experimental. The Bio page (and the owner-only `edit_bio` tool) edits the owner's `BIO.md` as raw Markdown and publishes it to peers' Spencers by default. Peer biographies feed agent context (`<peer_bio>` and `list_peers` / `read_peer_profile`) and are not exposed visually in peers' Web UI.
 
 Channels have `shareBio: boolean`, enabled by default. `PATCH /api/channels/:ch` accepts this field. Disabling sharing sends a hello without `about` to clear the current bio at peers. Peers can retain an older copy. BIO must not contain secrets, private IP addresses, or sensitive paths.
 
@@ -780,7 +780,7 @@ This tool cannot write rules. Owner chat can call
 `read_peer_profile({ target })` and `add_memoir_note({ target, text, pinned? })`.
 Targets require an exact identity ID, fingerprint, or unambiguous name. Ambiguous
 names fail with candidate fingerprints/IDs. Owner chat has no rules-writing tool;
-the owner uses Peer Card or Group Memoir to edit rules.
+the owner uses Memoir or Group Memoir to edit rules.
 
 Channel prompts include only their own scope's rules and up to 2000 characters of
 historical notes (pinned first, then newest). Notes are escaped as untrusted data
@@ -816,7 +816,7 @@ tools return `{ isError: true, text: "Policy violation: …" }` directing the
 agent to `ask_owner` without executing.
 
 Successful PUT emits `{ type: "tool_policies", scopeKind, scopeId }` and refreshes
-affected channels immediately. Channel Settings and Peer Cards expose a
+affected channels immediately. Channel Settings and Peer Memoirs expose a
 tool-level Tool guardrails editor with matcher and effect. Rules persist in the
 module-owned SQLite `agent_tool_policies` table.
 
