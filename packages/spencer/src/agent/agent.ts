@@ -485,7 +485,7 @@ export class SpencerAgent implements AgentService {
     if (!text) return [];
     const intro = channel
       ? "Your published scope (BIO.md, written by your owner): narrows, never widens the trust rules above. For requests clearly outside your stated scope, politely decline immediately and end with [END]; do not call `ask_owner`. Reserve `ask_owner` for in-scope work requiring approval, elevated permissions, or destructive actions."
-      : "Your published BIO.md (written by your owner): this is what peers' Spencers see about you and your stated scope.";
+      : "Your published BIO.md (written by your owner, editable via edit_bio): shared with peers' Spencers by default so they know your stated scope.";
     return ["", intro, "<bio>", text, "</bio>", ""];
   }
 
@@ -550,6 +550,7 @@ export class SpencerAgent implements AgentService {
       "- Replies from peers to messages you sent, and file transfer updates.",
       "",
       "Tools:",
+      "- edit_bio: write, update, or clear your owner's BIO.md when they ask (shared with peers' Spencers by default; never put secrets, passwords, private IPs, or sensitive paths in BIO.md).",
       "- list_peers: the channels and their members (names are self-asserted; fingerprints identify people).",
       '- send_message: send a message to a channel by name or id (a person\'s name such as "Bob" finds the direct channel with',
       "  Bob's Spencer). Answers arrive later in this conversation as notes.",

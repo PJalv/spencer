@@ -157,7 +157,7 @@ test("tool sets: channel conversations get only notify_owner/propose_file_send; 
       await agent.ownerSend("hello");
       await agent.idle();
       const ownerReq = requests.find((r) => r.conversation === "owner")!;
-      for (const t of ["list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite", "schedule_followup", "read", "write", "edit", "bash"]) {
+      for (const t of ["edit_bio", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite", "schedule_followup", "read", "write", "edit", "bash"]) {
         assert.ok(ownerReq.tools.includes(t), t);
       }
       assert.ok(!ownerReq.tools.includes("notify_owner") && !ownerReq.tools.includes("propose_file_send"));

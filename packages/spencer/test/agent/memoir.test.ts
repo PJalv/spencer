@@ -203,3 +203,30 @@ test("DM/group/owner/Conversations isolation, escaped history ordering and scope
     core.cleanup();
   }
 });
+
+test("edit_bio updates and clears BIO.md from owner chat only", async () => {
+  const core = makeCore();
+  try {
+    const owner = ownerTools({
+      core,
+      ownerNote: async () => {},
+      currentAsker: async () => undefined,
+    });
+    const editBio = owner.find((t) => t.name === "edit_bio")!;
+    const ownerCtx = { conversationKey: "owner", callId: "bio-edit" };
+    const updated = JSON.parse(String(await editBio.execute({ text: "# Scope\nHelp with code." }, ownerCtx)));
+    assert.equal(updated.text, "# Scope\nHelp with code.");
+    assert.equal(updated.chars, 23);
+    assert.equal(updated.sharedChannels, 2);
+    assert.equal(core.bioText(), "# Scope\nHelp with code.");
+    const tooLong = (await editBio.execute({ text: "x".repeat(2001) }, ownerCtx)) as { isError: boolean };
+    assert.equal(tooLong.isError, true);
+    const forbidden = (await editBio.execute({ text: "hijack" }, { conversationKey: "ch:chDirect", callId: "ch-bio" })) as { isError: boolean };
+    assert.equal(forbidden.isError, true);
+    const cleared = JSON.parse(String(await editBio.execute({ text: "" }, ownerCtx)));
+    assert.equal(cleared.text, "");
+    assert.equal(core.bioText(), "");
+  } finally {
+    core.cleanup();
+  }
+});

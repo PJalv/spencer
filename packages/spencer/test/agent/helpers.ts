@@ -1,4 +1,6 @@
 import { ToolPolicyStore } from "../../src/agent/tool-policy.ts";
+import { MAX_ABOUT } from "@spencer/protocol";
+import { readBio, writeBio } from "../../src/bio.ts";
 import { Memoir } from "../../src/memoir.ts";
 /** Test helpers: an in-memory stub of `CoreServices` and small waiting utilities. */
 import { DatabaseSync } from "node:sqlite";
@@ -88,9 +90,9 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
   const byKey = new Map<string, string>();
   const core: StubCore = {
     memoir: new Memoir({db,dataDir:dir,peers:()=>[],channels:()=>[...channels.values()],events:{emit(){}},refresh() {}}),
-    bio: () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
+    bio: () => ({ text: readBio(dir), maxChars: MAX_ABOUT, sharedChannels: [...channels.values()].filter((c) => c.shareBio).map(({ id, name, kind, trust }) => ({ id, name, kind, trust })) }),
     bioText: () => core.bio().text,
-    setBio: async () => ({ text: "", maxChars: 2000, sharedChannels: [] }),
+    setBio: async (text) => { writeBio(dir, text); return core.bio(); },
     peerBios: () => [],
     listPeerDirectory: () => [],
     dir,
