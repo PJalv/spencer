@@ -266,6 +266,8 @@ export class SpencerAgent implements AgentService {
     for (const row of rows) this.kick(row);
     // …and follow-ups that fired but did not finish; then the timer for the pending ones.
     for (const row of this.followups.unfinished()) this.kickFollowup(row);
+    for (const row of this.followups.pendingWatches()) this.drainWatch(row.id);
+    for (const row of this.followups.unnotifiedTasks()) this.finishLinkedTask(row);
     this.followups.start();
     // …and conversation openings; then the Conversations timers.
     for (const row of this.convos.openers()) this.kickOpener(row.ch, row.opener!, row.opener_sid);
@@ -325,8 +327,7 @@ export class SpencerAgent implements AgentService {
           const audit = async (value: unknown, failed: boolean) => {
             if (!ctx.conversationKey.startsWith("ch:")) return;
             const ch = this.core.getChannel(ctx.conversationKey.slice(3));
-            let preview = typeof value === "string" ? value : JSON.stringify(value) ?? "";
-            for (const config of Object.values(this.core.config().mcpServers ?? {})) preview = formatMcpError(preview, config);
+            const preview = this.auditPreview(typeof value === "string" ? value : JSON.stringify(value) ?? "");
             await this.ownerNote(`${ch?.name ?? "A channel"} (${ch?.trust === "full" ? "full trust" : "allowed tool"}): your Spencer called ${t.name} — ${failed ? "failed" : "result"} (untrusted): ${preview.slice(0, 400)}`, { untrusted: true });
           };
           let out;
@@ -755,7 +756,12 @@ export class SpencerAgent implements AgentService {
       for (const row of waiting) {
         if (!this.budget.check(msg.ch, limits).ok) break;
         this.budget.record(msg.ch);
-        await this.fireFollowup(row, "reply", msg.body.final === true);
+        if (row.watch) {
+          if (!this.followups.enqueueUpdate(row.id, msg.id, this.wrap(msg, ch), msg.body.final === true)) continue;
+          this.drainWatch(row.id);
+        } else {
+          await this.fireFollowup(row, "reply", msg.body.final === true);
+        }
         ownerHandles = true;
       }
     }
@@ -1106,6 +1112,12 @@ export class SpencerAgent implements AgentService {
     this.kickFollowup(this.followups.get(row.id)!);
   }
 
+  private drainWatch(id: string): void {
+    if (this.stopping) return;
+    const row = this.followups.claimUpdate(id);
+    if (row) this.kickFollowup(row);
+  }
+
   private kickFollowup(row: FollowupRow): void {
     const key = `followup:${row.id}:w${row.wake_count}`;
     if (this.stopping || this.inflight.has(key)) return;
@@ -1114,9 +1126,18 @@ export class SpencerAgent implements AgentService {
   }
 
   private finishLinkedTask(row: FollowupRow, failed = false): void {
-    if (!row.task_ch || !row.task_msg_id || this.followups.linkedTask(row.task_ch, row.task_msg_id).length) return;
+    if (!row.task_ch || !row.task_msg_id || this.followups.get(row.id)?.task_notified || this.followups.linkedTask(row.task_ch, row.task_msg_id).length) return;
     const failure = this.core.db.prepare("SELECT id FROM agent_followups WHERE task_ch = ? AND task_msg_id = ? AND state = 'failed' LIMIT 1").get(row.task_ch, row.task_msg_id);
     this.core.sendStatus?.(row.task_ch, { replyTo: row.task_msg_id, state: failed || failure ? "failed" : "completed" });
+    this.followups.taskNotified(row.task_ch, row.task_msg_id);
+  }
+
+  private auditPreview(text: string): string {
+    // Apply generic credential redaction even when no MCP server is configured.
+    let preview = text;
+    for (const config of Object.values(this.core.config().mcpServers ?? {})) preview = formatMcpError(preview, config);
+    preview = formatMcpError(preview, { command: "" });
+    return preview.slice(0, 400);
   }
 
   private groupMentions(ch: Channel, text: string, recipient?: string): string[] {
@@ -1124,7 +1145,7 @@ export class SpencerAgent implements AgentService {
     const explicit = ch.members
       .filter((member) => member.id !== me && member.name && textMentions(text, member.name))
       .map((member) => member.id);
-    return [...new Set([...(recipient && recipient !== me ? [recipient] : []), ...explicit])];
+    return [...new Set([...(recipient && recipient !== me ? [recipient] : []), ...explicit])].slice(0, 64);
   }
 
   private async processFollowup(row: FollowupRow): Promise<void> {
@@ -1163,11 +1184,12 @@ export class SpencerAgent implements AgentService {
             ...(out.final ? { final: true } : {}),
             idempotencyKey: `followup:${row.id}`,
           });
-          await this.ownerNote(`[follow-up in ${ch.name}]: ${clip(out.text).slice(0, 400)}`, { untrusted: true }).catch((e) => this.log(`Follow-up audit failed: ${String(e)}`));
+          await this.ownerNote(`[follow-up in ${ch.name}]: ${this.auditPreview(out.text)}`, { untrusted: true }).catch((e) => this.log(`Follow-up audit failed: ${String(e)}`));
         }
       }
       if (!this.followups.rearm(row.id)) this.followups.finish(row.id, "done");
       this.finishLinkedTask(row);
+      this.drainWatch(row.id);
     } catch (e) {
       // Left "fired": the next start() resumes it.
       if (!this.stopping) this.log(`follow-up ${row.id} failed: ${(e as Error).message}`);
@@ -1186,6 +1208,7 @@ export class SpencerAgent implements AgentService {
       return [
         `[Follow-up you scheduled at ${set}; it fired because ${why}. Your owner did not just write.]`,
         note,
+        ...(row.wake_text ? [row.wake_text] : []),
         "Do what the note says with your tools, and report with send_message if someone is waiting. If it is not done yet,",
         row.watch && row.fired_by === "reply"
           ? `Watch ${row.id}, wake ${row.wake_count}/${row.max_wakes}: the peer's message is ${row.last_msg_final ? "final; the exchange has ended" : "non-final; more updates may arrive"}. Leave this watch open for subsequent deliverables, or call cancel_followup with its id if settled.`

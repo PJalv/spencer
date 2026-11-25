@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { SpencerAgent } from "../../src/agent/agent.ts";
 import { FollowupStore } from "../../src/agent/followups.ts";
-import { BOB, CAROL, ME, makeCore, peerChat } from "./helpers.ts";
+import { BOB, CAROL, ME, makeCore, peerChat, waitFor } from "./helpers.ts";
 
 test("three Spencers relay explicit group mentions; plain names do not wake the third", async () => {
   const identities = [ME, BOB, CAROL];
@@ -151,5 +151,127 @@ test("owner watch closes at its wake cap and respects cancellation during its ow
     await agent.idle();
     assert.equal(agent.listFollowups().filter((f) => f.state === "pending").length, 0);
     assert.ok(agent.listFollowups().some((f) => f.state === "cancelled"));
+  } finally { await agent.stop(); core.cleanup(); }
+});
+
+for (const restart of [false, true]) {
+  test(`watch drains updates received during a wake${restart ? " after restart" : ""}`, async () => {
+    const core = makeCore();
+    let entered = false;
+    let release = () => {};
+    const inputs: string[] = [];
+    let agent = new SpencerAgent(core, { log: () => {}, fakeHooks: {
+      onRequest: (info) => { if (info.text.includes("<followup_note>")) inputs.push(info.text); },
+      gate: (info, signal) => info.text.includes("<followup_note>") ? new Promise<void>((resolve, reject) => {
+        entered = true; release = resolve;
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }) : Promise.resolve(),
+    } });
+    try {
+      await agent.start();
+      await agent.ownerSend('/ask "Bob chat" monitor'); await agent.idle();
+      const ch = core.getChannel("chDirect")!;
+      await agent.onPeerChat(peerChat(ch, "ACK", { by: "agent" }));
+      await waitFor(() => entered);
+      const result = peerChat(ch, "FINAL_DURING_WAKE", { by: "agent", final: true });
+      assert.equal((await agent.onPeerChat(result)).note, "handled by owner");
+      assert.equal((await agent.onPeerChat(result)).note, "handled by owner"); // redelivery does not enqueue twice
+      if (restart) {
+        await agent.stop();
+        agent = new SpencerAgent(core, { log: () => {}, fakeHooks: {
+          onRequest: (info) => { if (info.text.includes("<followup_note>")) inputs.push(info.text); },
+        } });
+        await agent.start();
+      } else {
+        // Subsequent wakes must run without the first wake's gate.
+        const firstRelease = release;
+        entered = false;
+        firstRelease();
+        await waitFor(() => entered);
+        release();
+      }
+      await agent.idle();
+      const watch = agent.listFollowups()[0]!;
+      assert.equal(watch.state, "done");
+      assert.equal(watch.wakeCount, 2);
+      assert.ok(inputs.some((input) => input.includes("FINAL_DURING_WAKE") && input.includes("final; the exchange has ended")));
+      assert.equal(core.sent.length, 1, "only the initial owner send, no channel-agent response");
+      assert.equal(core.db.prepare("SELECT count(*) AS n FROM agent_watch_updates").get()!.n, 0);
+    } finally { await agent.stop(); core.cleanup(); }
+  });
+}
+
+test("group replies and follow-ups cap mentions at 64 and preserve the reply target first", async () => {
+  const core = makeCore();
+  const ch = core.getChannel("chGroup")!;
+  const peers = Array.from({ length: 70 }, (_, i) => ({
+    id: `peer-${i}`, name: `Member${i}`, fingerprint: `fp-${i}`, me: false, presence: "online" as const,
+  }));
+  ch.members.push(...peers);
+  const handles = peers.map((peer) => `@${peer.name}`).join(" ");
+  let now = Date.now();
+  const agent = new SpencerAgent(core, { now: () => now, log: () => {} });
+  try {
+    await agent.start();
+    await agent.onPeerChat(peerChat(ch, `@Alice ${handles}`, { mentions: [ME.id] }));
+    await agent.idle();
+    await agent.onPeerChat(peerChat(ch, `@Alice please follow up in 1 minutes: ${handles}`, { mentions: [ME.id] }));
+    await agent.idle();
+    now += 61_000; await agent.followupTick(); await agent.idle();
+    for (const reply of [core.sent[0]!, core.sent.at(-1)!]) {
+      assert.equal(reply.mentions!.length, 64);
+      assert.equal(reply.mentions![0], BOB.id);
+      assert.equal(new Set(reply.mentions).size, 64);
+      assert.ok(!reply.mentions!.includes(ME.id));
+    }
+  } finally { await agent.stop(); core.cleanup(); }
+});
+
+test("cancelled active follow-up reconciles the linked task after restart", async () => {
+  const core = makeCore();
+  let now = Date.now();
+  let entered = false;
+  let agent = new SpencerAgent(core, { now: () => now, log: () => {}, fakeHooks: {
+    gate: (info, signal) => info.text.includes("<followup_note>") ? new Promise<void>((_resolve, reject) => {
+      entered = true;
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }) : Promise.resolve(),
+  } });
+  try {
+    await agent.start();
+    const incoming = peerChat(core.getChannel("chDirect")!, 'please ask owner: /followup 1 check');
+    await agent.onPeerChat(incoming); await agent.idle();
+    await agent.decideRequest(agent.listRequests().find((r) => r.kind === "peer")!.id, true);
+    await agent.idle();
+    now += 61_000; await agent.followupTick(); await waitFor(() => entered);
+    agent.cancelFollowup(agent.listFollowups()[0]!.id);
+    assert.equal(core.statuses.at(-1)!.state, "working");
+    await agent.stop();
+    agent = new SpencerAgent(core, { now: () => now, log: () => {} });
+    await agent.start(); await agent.idle();
+    assert.equal(core.statuses.at(-1)!.state, "completed");
+    assert.equal(core.statuses.at(-1)!.replyTo, incoming.id);
+    const count = core.statuses.length;
+    await agent.stop();
+    agent = new SpencerAgent(core, { now: () => now, log: () => {} });
+    await agent.start(); await agent.idle();
+    assert.equal(core.statuses.length, count, "settled statuses are not resent every restart");
+  } finally { await agent.stop(); core.cleanup(); }
+});
+
+test("follow-up owner summaries redact credentials even without an MCP server", async () => {
+  const core = makeCore();
+  let now = Date.now();
+  const agent = new SpencerAgent(core, { now: () => now, log: () => {} });
+  try {
+    await agent.start();
+    await agent.onPeerChat(peerChat(core.getChannel("chDirect")!, "please follow up in 1 minutes: password=hunter2 Bearer private-token"));
+    await agent.idle();
+    now += 61_000; await agent.followupTick(); await agent.idle();
+    const note = (await agent.ownerTranscript(100)).find((item) => item.text.startsWith("[follow-up in"))!;
+    assert.ok(note.untrusted);
+    assert.ok(note.text.includes("[redacted]"));
+    assert.ok(!note.text.includes("hunter2"));
+    assert.ok(!note.text.includes("private-token"));
   } finally { await agent.stop(); core.cleanup(); }
 });
