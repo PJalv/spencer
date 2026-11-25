@@ -203,6 +203,7 @@ export function upsertChannel(c) {
 export function removeChannel(ch) {
   S.channels.delete(ch);
   S.messages.delete(ch);
+  S.typing.delete(ch);
   delete S.ack[ch];
   delete S.local[ch];
   saveAck();
@@ -479,17 +480,21 @@ export function applyBioEvent(ev) {
 }
 
 export function clearTyping(ch, from) {
-  if (S.typing.get(ch)?.delete(from)) emit(`typing:${ch}`);
+  const entries = S.typing.get(ch);
+  if (!entries?.delete(from)) return;
+  if (!entries.size) S.typing.delete(ch);
+  emit(`typing:${ch}`);
 }
 export function setTyping(ev) {
   if (!ev.active) return clearTyping(ev.ch, ev.from);
   if (!S.typing.has(ev.ch)) S.typing.set(ev.ch, new Map());
-  S.typing.get(ev.ch).set(ev.from, { ts: ev.ts });
+  S.typing.get(ev.ch).set(ev.from, { ts: Date.now() });
   emit(`typing:${ev.ch}`);
 }
 export function typingIn(ch) {
   const entries = S.typing.get(ch);
   if (!entries) return [];
   for (const [id, value] of entries) if (Date.now() - value.ts >= 8000) entries.delete(id);
+  if (!entries.size) S.typing.delete(ch);
   return [...entries.keys()];
 }

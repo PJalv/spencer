@@ -300,6 +300,7 @@ export class Daemon {
       log,
       channelInfo: (ch) => channels.info(ch),
       route: (msg, body) => this.route(msg, body),
+      typing: (ch, from, active, ts) => this.receiveTyping(ch, from, active, ts),
       routed: (msg, body) => {
         if (body.type === "chat" || body.type === "hello") {
           const m = channels.message(msg.id);
@@ -469,7 +470,7 @@ export class Daemon {
     }
     if (isLinkBody(body)) { if (body.to === this.need("me").id) void this.s.links?.onSignal(ch, env.from, body); return; }
     if (body.type === "typing") {
-      if (Date.now() - env.ts < 15_000) this.events.emit({ type: "typing", ch, from: env.from, active: body.active, ts: env.ts });
+      this.receiveTyping(ch, env.from, body.active, env.ts);
       return;
     }
     if (body.type !== "status" || Date.now() - env.ts >= STATUS_MAX_AGE_MS) return;
@@ -484,6 +485,12 @@ export class Daemon {
     });
   }
 
+  private receiveTyping(ch: string, from: string, active: boolean, ts: number): void {
+    const age = Date.now() - ts;
+    if (age >= 15_000 || age < -5_000) return;
+    this.events.emit({ type: "typing", ch, from, active, ts });
+  }
+
   // ------------------------------------------------------------- routing
 
   private async route(msg: StoredMessage, body: Body): Promise<void> {
@@ -496,7 +503,7 @@ export class Daemon {
         await this.routeChat(msg, body);
         return;
       case "typing":
-        if (Date.now() - msg.ts < 15_000) this.events.emit({ type: "typing", ch: msg.ch, from: msg.from_id, active: body.active, ts: msg.ts });
+        this.receiveTyping(msg.ch, msg.from_id, body.active, msg.ts);
         this.need("sql").run("DELETE FROM messages WHERE id = ?", msg.id);
         return;
       case "status":
@@ -641,6 +648,7 @@ export class Daemon {
           const now = Date.now();
           if (active && now - (daemon.typingSent.get(ch) ?? 0) < 2000) return;
           if (active) daemon.typingSent.set(ch, now);
+          else daemon.typingSent.delete(ch);
           conn.request({ t: "send", env: sealEnvelope(daemon.need("me"), ch, info.encKey, { type: "typing", active }), ephemeral: true }).catch(() => {});
         } catch {}
       },

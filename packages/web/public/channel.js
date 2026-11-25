@@ -599,22 +599,28 @@ function membersPref() {
   }
 }
 
-function memberRow(c, m) {
+function memberStatus(c, m) {
   const w = workingOf(c.id, m.id);
   const info = presenceInfo(m, c.id);
-  const name = m.name ?? `${m.id.slice(0, 6)}…`;
-  const av = m.me ? selfAvatar() : avatar(name, m.id);
   let status;
   if (typingIn(c.id).includes(m.id)) status = h("span.member-status.live", null, "typing…");
   else if (w) status = h("span.member-status.live", null, h("span.act.shimmer", null, activityLine(w.activity)));
   else if (m.me) status = h("span.member-status", null, "this computer");
   else if (info) status = h("span.member-status", null, info.text);
   else status = h("span.member-status", null, m.name ? "presence unknown" : "has not said hello yet");
+  return status;
+}
+
+function memberRow(c, m) {
+  const w = workingOf(c.id, m.id);
+  const info = presenceInfo(m, c.id);
+  const name = m.name ?? `${m.id.slice(0, 6)}…`;
+  const av = m.me ? selfAvatar() : avatar(name, m.id);
   return h(
     "li.member",
-    m.me ? null : { tabindex: "0", role: "button", on: { click: () => peerCard(m.id, c.id), keydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peerCard(m.id, c.id); } } } },
+    { "data-member-id": m.id, ...(m.me ? {} : { tabindex: "0", role: "button", on: { click: () => peerCard(m.id, c.id), keydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peerCard(m.id, c.id); } } } }) },
     mark(av, w ? { state: /^thinking/i.test(w.activity) ? "thinking" : "working", text: w.activity.replace(/…$/, "") } : info),
-    h("div.member-text", null, h("div.member-name", null, name), status),
+    h("div.member-text", null, h("div.member-name", null, name), memberStatus(c, m)),
     h("code.fp", { title: `Fingerprint ${m.fingerprint}\nid ${m.id}` }, shortFp(m.fingerprint)),
   );
 }
@@ -843,11 +849,20 @@ export function channelView(main, chId) {
   comp.form.prepend(completer.el);
 
   const typingBar = h("div.typing-bar", { role: "status" });
+  let shownTyping = [];
   const renderTyping = () => {
     const ids = typingIn(chId);
+    if (ids.length === shownTyping.length && ids.every((id, i) => id === shownTyping[i])) return;
+    const changed = new Set([...shownTyping.filter(id => !ids.includes(id)), ...ids.filter(id => !shownTyping.includes(id))]);
+    shownTyping = ids;
     const names = ids.map(id => getC()?.members.find(m => m.id === id)?.name || "Someone");
     typingBar.textContent = ids.length === 1 ? `${names[0]} is typing…` : ids.length === 2 ? `${names[0]} and ${names[1]} are typing…` : ids.length ? `${ids.length} people are typing…` : "";
-    renderMembers();
+    const c = getC();
+    for (const row of members.querySelectorAll(".member-list > .member")) {
+      if (!changed.has(row.dataset.memberId)) continue;
+      const m = c?.members.find(m => m.id === row.dataset.memberId);
+      if (m) row.querySelector(".member-status")?.replaceWith(memberStatus(c, m));
+    }
   };
   comp.input.addEventListener("blur", stopTyping);
   comp.form.prepend(typingBar);
@@ -905,6 +920,7 @@ export function channelView(main, chId) {
         h("button.btn.sm", { type: "button", on: { click: () => settingsModal(c) } }, icon("gear", 14), "Channel settings"),
       ),
     ].filter(Boolean));
+    renderTyping();
   };
 
   const renderHeader = () => {
@@ -1110,7 +1126,10 @@ export function channelView(main, chId) {
     renderMembers();
   };
   renderWorking();
-  const typingExpiry = setInterval(renderTyping, 1000);
+  renderTyping();
+  const typingExpiry = setInterval(() => {
+    if (S.typing.get(chId)?.size) renderTyping();
+  }, 1000);
   const staleTimer = setInterval(() => {
     renderMembers(); // "seen 5m ago" ages
     if (workingIn(chId).length) renderWorking();
