@@ -3560,15 +3560,13 @@ details[open] > summary > .icon:last-child,
   border-top: 1px solid var(--line);
 }
 .tp-head { display: grid; gap: 4px; }
-.tp-list { display: grid; gap: 12px; }
+.tp-list { display: grid; gap: 8px; }
 .tp-rule {
   margin: 0;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   background: var(--raised);
-  display: grid;
-  gap: 10px;
   min-width: 0;
 }
 .tp-rule > .sr-only {
@@ -3601,44 +3599,6 @@ details[open] > summary > .icon:last-child,
   color: var(--ink-2);
 }
 .tp-remove { flex: none; height: 38px; }
-.tp-details {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-}
-.tp-summary {
-  cursor: pointer;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--ink-2);
-  user-select: none;
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.tp-summary::-webkit-details-marker { display: none; }
-.tp-summary::before {
-  content: "▸";
-  font-size: 11px;
-  color: var(--ink-3);
-  transition: transform 0.12s ease;
-}
-.tp-details[open] > .tp-summary::before { transform: rotate(90deg); }
-.tp-args {
-  margin-top: 10px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-@media (max-width: 640px) {
-  .tp-args { grid-template-columns: 1fr; }
-}
-.tp-args textarea.input {
-  min-height: 76px;
-  font-size: 12px;
-  line-height: 1.45;
-  resize: vertical;
-}
 .tp-actions {
   display: flex;
   align-items: center;

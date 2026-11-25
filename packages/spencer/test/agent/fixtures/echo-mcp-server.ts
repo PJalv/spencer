@@ -17,7 +17,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     { name: "pid", description: "Process id of this server", inputSchema: { type: "object", properties: {} } },
     { name: "fail", description: "Always fails", inputSchema: { type: "object", properties: {} } },
-    { name: "big", description: "A large result", inputSchema: process.argv.includes("--bad-schema") ? { type: "object", properties: { text: { type: "string", pattern: "[" } } } : { type: "object", properties: {} } },
+    { name: "big", description: "A large result", inputSchema: { type: "object", properties: {} } },
   ],
 }));
 

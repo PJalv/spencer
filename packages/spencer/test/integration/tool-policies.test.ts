@@ -21,16 +21,15 @@ test('two Spencers: group requests obey live peer MCP guardrails in Full Trust',
     await B.req('PATCH',`/api/channels/${ch}`,{autoReply:false});
     await waitFor(async()=> (await A.req<{mcp:{status:string}[]}>('GET','/api/state')).mcp.some(s=>s.status==='connected'),'MCP connected');
     await A.req('PUT',`/api/peers/${b.identity.id}/tool-policies`,{rules:[
-      {toolPattern:'*pid',effect:'deny'}, {toolPattern:'*fail',effect:'ask_owner'},
-      {toolPattern:'*echo',effect:'allow',argDefaults:{text:'from defaults'},argLocks:{provider:'codex',model:'chosen','modelSelection.model':'nested'},argAllowValues:{projectId:['spencer']}}
+      {toolPattern:'*pid',effect:'deny'},
+      {toolPattern:'*fail',effect:'ask_owner'},
+      {toolPattern:'*echo',effect:'allow'}
     ]});
     const call=async(tool:string,args:unknown)=>{
       const sent=await B.say(ch,`please call mcp__echo__${tool} ${JSON.stringify(args)}`,[a.identity.id]);
       return await waitFor(async()=> (await A.messages(ch)).find(m=>m.replyTo===sent.id&&m.mine)?.text,'policy response');
     };
-    assert.match(await call('echo',{projectId:'spencer'}),/echo: from defaults/);
-    assert.match(await call('echo',{projectId:'wrong'}),/Policy violation:.*projectId/);
-    assert.match(await call('echo',{projectId:'spencer',model:'wrong'}),/Policy violation:.*model/);
+    assert.match(await call('echo',{text:'hello'}),/echo: hello/);
     assert.match(await call('fail',{}),/Policy violation:.*ask_owner/);
     assert.doesNotMatch(await call('pid',{}),/done: \d+/);
   } finally {for(const n of nodes.reverse()) await n.stop(); await relay.stop(); t.cleanup();}
