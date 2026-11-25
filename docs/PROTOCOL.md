@@ -757,3 +757,9 @@ Channel prompts include only their own scope's rules and up to 2000 characters o
 historical notes (pinned first, then newest). Notes are escaped as untrusted data
 at the end of the prompt. A group never receives a member's DM rules or notes.
 Owner prompts never automatically include peer or group history.
+
+### Work Brief and external agents
+
+The authenticated local API exposes `GET /api/work-brief` with optional `visibility`, `status`, and `project` filters, `POST /api/work-brief` to insert or upsert by `key`, and `PATCH` or `DELETE /api/work-brief/:id`. Items include a title, summary, visibility (`private`, `trusted`, or `public`), status (`active`, `blocked`, or `done`), optional project, links, source, and expiry. Changes emit a `work_brief` event. Private items stay in the owner context; trusted items may appear in full-trust work channels; public items may appear in standard and full-trust work channels.
+
+POST accepts `notifyOwner` for an untrusted owner note, `wakeOwner` to request an owner turn with the external status wrapped as untrusted data, and `notifyChannel` with an optional `final` flag to post to a permitted channel. Visibility must be `private`, `trusted`, or `public`; `null` is invalid. Unauthorized channel notifications are rejected before writing. The store retains at most 50 live items and the 25 most recently updated completed items. Use a stable key to update an item in place. The `spencer mcp spencer` bridge also provides `spencer_publish_update`, `spencer_work_brief`, `spencer_read_peer`, `spencer_add_memoir_note`, `spencer_send_file`, and `spencer_list_transfers` to local agents and scripts.

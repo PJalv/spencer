@@ -43,6 +43,10 @@ const enc = encodeURIComponent;
 
 export const api = {
   typing: (ch, active) => { void request("POST", `/api/channels/${ch}/typing`, { active }).catch(() => {}); },
+  workBrief: () => request("GET", "/api/work-brief"),
+  addWorkBrief: item => request("POST", "/api/work-brief", item),
+  patchWorkBrief: (id, patch) => request("PATCH", `/api/work-brief/${enc(id)}`, patch),
+  deleteWorkBrief: id => request("DELETE", `/api/work-brief/${enc(id)}`),
   memoir: (kind, id, markSeen = false) => request("GET", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/memoir${markSeen ? "?markSeen=1" : ""}`),
   setRules: (kind, id, text) => request("PUT", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/rules`, { text }),
   addMemoirNote: (kind, id, text, pinned = false) => request("POST", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/notes`, { text, pinned }),

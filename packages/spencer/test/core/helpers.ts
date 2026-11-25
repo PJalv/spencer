@@ -67,6 +67,7 @@ export class StubAgent implements AgentService {
   ownerSends: string[] = [];
   ownerSendOptions: ({ requestId?: string; attachments?: { id: string; name: string; size: number; path: string }[] } | undefined)[] = [];
   notes: string[] = [];
+  noteOptions: ({ untrusted?: boolean } | undefined)[] = [];
   changed: string[] = [];
   /** What `humanConversationRef` hands the daemon for a person's message in a Conversations channel. */
   convoRef?: ConvoRef;
@@ -112,8 +113,9 @@ export class StubAgent implements AgentService {
   ownerBusy() {
     return false;
   }
-  async ownerNote(text: string) {
+  async ownerNote(text: string, opts?: { untrusted?: boolean }) {
     this.notes.push(text);
+    this.noteOptions.push(opts);
   }
   async channelChanged(ch: string) {
     this.changed.push(ch);

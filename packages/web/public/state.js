@@ -472,6 +472,7 @@ export function channelStatus(c) {
 
 export function applyBioEvent(ev) {
   if (ev.type === "bio") { S.bio = ev.bio; emit("bio", ev.bio); }
+  if (ev.type === "work_brief") emit("work_brief", ev);
   if (ev.type === "peer_bio") {
     if (!S.peerBios.has(ev.ch)) S.peerBios.set(ev.ch, new Map());
     S.peerBios.get(ev.ch).set(ev.id, ev);

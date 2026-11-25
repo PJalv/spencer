@@ -46,6 +46,56 @@ export function bioView(main) {
     ),
   );
 
+  const brief = h("div.wb-list");
+  const title = h("input.input", { placeholder: "Title", "aria-label": "Work title", maxlength: "160" });
+  const summary = h("textarea.input", { rows: 2, placeholder: "Current status", "aria-label": "Work summary", maxlength: "1000" });
+  const visibility = h("select.input.wb-select", { "aria-label": "Visibility" }, ...["private", "trusted", "public"].map(v => h("option", { value: v }, v)));
+  const add = h("button.btn.primary", { type: "button" }, "Add work item");
+  main.querySelector(".page-body").append(
+    h(
+      "section.wb-section",
+      null,
+      h("div.wb-head", null, h("h2", null, "Work Brief"), h("p.hint", null, "Private stays with you; trusted is shared with full-trust channels; public is shared with all work channels.")),
+      h("div.wb-form", null, title, summary, h("div.wb-form-row", null, visibility, add)),
+      brief,
+    ),
+  );
+  const refreshBrief = async () => {
+    const data = await attempt(() => api.workBrief());
+    if (!data) return;
+    brief.replaceChildren(...data.items.map(item => {
+      const select = h("select.input.wb-select", { "aria-label": `Visibility for ${item.title}` }, ...["private", "trusted", "public"].map(v => h("option", { value: v }, v)));
+      select.value = item.visibility;
+      select.addEventListener("change", async () => { await attempt(() => api.patchWorkBrief(item.id, { visibility: select.value })); void refreshBrief(); });
+      const done = h("button.btn.sm", { type: "button" }, item.status === "done" ? "Mark active" : "Mark done");
+      done.addEventListener("click", async () => { await attempt(() => api.patchWorkBrief(item.id, { status: item.status === "done" ? "active" : "done" })); void refreshBrief(); });
+      const del = h("button.btn.sm", { type: "button" }, "Delete");
+      del.addEventListener("click", async () => { await attempt(() => api.deleteWorkBrief(item.id)); void refreshBrief(); });
+      const pillClass = item.status === "active" ? "span.pill.ok" : item.status === "blocked" ? "span.pill.attn" : "span.pill";
+      return h(
+        "div.wb-card",
+        { "data-status": item.status },
+        h("div.wb-card-top", null, h("h3.wb-title", null, item.title), h(pillClass, null, item.status)),
+        h("p.wb-summary", null, item.summary),
+        h("div.wb-card-foot", null, select, done, del),
+      );
+    }));
+  };
+  add.addEventListener("click", async () => {
+    if (add.disabled) return;
+    const submitted = { title: title.value, summary: summary.value, visibility: visibility.value, source: "owner" };
+    add.disabled = true;
+    try {
+      const result = await attempt(() => api.addWorkBrief(submitted));
+      if (result) {
+        if (title.value === submitted.title) title.value = "";
+        if (summary.value === submitted.summary) summary.value = "";
+        void refreshBrief();
+      }
+    } finally { add.disabled = false; }
+  });
+  void refreshBrief();
+  const offBrief = on("work_brief", () => void refreshBrief());
   const channels = h("ul.bio-channels");
   main.querySelector(".page-body").append(h("h2", null, "Shared with"), channels);
   let saved = "";
@@ -106,5 +156,5 @@ export function bioView(main) {
   sync();
   attempt(() => api.bio()).then((r) => r && load(r));
   const off = on("bio", r => { if (editor.value.trim() === saved) load(r); else showChannels(r); });
-  return { destroy() { off(); } };
+  return { destroy() { off(); offBrief(); } };
 }

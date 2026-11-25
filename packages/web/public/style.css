@@ -3461,3 +3461,53 @@ details[open] > summary > .icon:last-child,
 .typing-bar:not(:empty)::after { content: " •"; animation: typing-pulse 1.2s ease-in-out infinite; }
 @keyframes typing-pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .typing-bar::after { animation: none; } }
+
+/* Global Work Brief (Bio page) */
+.wb-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+}
+.wb-head { display: grid; gap: 4px; }
+.wb-form {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+}
+.wb-form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.wb-select { width: auto; min-width: 120px; }
+.wb-list { display: grid; gap: 10px; }
+.wb-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+}
+.wb-card[data-status="done"] { opacity: 0.72; }
+.wb-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wb-title { font-size: 15px; font-weight: 600; color: var(--ink); }
+.wb-summary { font-size: 14px; line-height: 1.5; color: var(--ink-2); }
+.wb-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

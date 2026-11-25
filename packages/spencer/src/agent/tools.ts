@@ -40,7 +40,7 @@ export interface ToolDeps {
   log?(msg: string): void;
 }
 
-export const OWNER_TOOL_NAMES = ["read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
+export const OWNER_TOOL_NAMES = ["update_work_brief", "list_work_brief", "read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
 export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send"];
 export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
 export const CONVERSATION_TOOL_NAMES = ["search_news"];
@@ -123,6 +123,21 @@ function offlineNote(ch: Channel): string {
 export function ownerTools(deps: ToolDeps): ToolSpec[] {
   const { core } = deps;
   return [
+    {
+      name: "list_work_brief", description: "List the owner's current work brief.", parameters: schema({}),
+      async execute(_args: object, ctx) {
+        if (ctx.conversationKey !== "owner") return fail("owner conversation required");
+        return JSON.stringify(core.workBrief?.list() ?? []);
+      },
+    },
+    {
+      name: "update_work_brief", description: "Create or update a work brief item by stable key.",
+      parameters: schema({ key: str("Stable key"), title: str("Title"), summary: str("Summary"), visibility: { type: "string", enum: ["private", "trusted", "public"] }, status: { type: "string", enum: ["active", "blocked", "done"] }, project: str("Project"), source: str("Source") }, ["title", "summary"]),
+      async execute(args: { key?: string; title: string; summary: string; visibility?: "private" | "trusted" | "public"; status?: "active" | "blocked" | "done"; project?: string; source?: string }, ctx) {
+        if (ctx.conversationKey !== "owner") return fail("owner conversation required");
+        try { if (!core.workBrief) return fail("work brief unavailable"); return JSON.stringify(core.workBrief.upsert(args)); } catch (e) { return fail((e as Error).message); }
+      },
+    },
     {
       name: "read_peer_profile",
       description:
