@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { startRelay } from "../../../relay/src/index.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
 import { freePort, quietLog, relayAt, startNode, tempDir, waitFor, type TestNode } from "./helpers.ts";
@@ -130,4 +131,47 @@ test("an older relay (no presence, no ephemeral): presence is unknown, and statu
     await relay.close();
     t.cleanup();
   }
+});
+
+test("typing uses the ephemeral relay and HTTP validates and throttles", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    const seen: DaemonEvent[] = [];
+    B.daemon.events.subscribe(e => seen.push(e));
+    const post = (channel: string, active: unknown) => fetch(`http://127.0.0.1:${A.daemon.port}/api/channels/${channel}/typing`, {
+      method: "POST", headers: { "X-Spencer-Token": A.daemon.token, "Content-Type": "application/json" }, body: JSON.stringify({ active }),
+    });
+    assert.equal((await post("unknown", true)).status, 404);
+    assert.equal((await post(ch, "yes")).status, 400);
+    assert.equal((await post(ch, true)).status, 200);
+    await waitFor(() => seen.some(e => e.type === "typing" && e.active), "typing received");
+    await post(ch, true);
+    await post(ch, false);
+    await waitFor(() => seen.some(e => e.type === "typing" && !e.active), "typing stopped");
+    assert.equal(seen.filter(e => e.type === "typing" && e.active).length, 1);
+    assert.equal(B.daemon.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'typing'").get()!.n, 0);
+    assert.equal(B.agent().peerChats.length, 0);
+  } finally {
+    await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup();
+  }
+});
+
+
+test("typing is never sent to a legacy relay", async () => {
+  const t = tempDir();
+  const dbPath = join(t.dir, "relay.sqlite");
+  const relay = await startRelay({ host: "127.0.0.1", port: 0, dbPath, log: quietLog, features: { presence: false, ephemeral: false } });
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    await B.daemon.stop();
+    const db = new DatabaseSync(dbPath);
+    const before = db.prepare("SELECT count(*) AS n FROM messages").get()!.n;
+    A.daemon.core.sendTyping(ch, true);
+    A.daemon.core.sendTyping(ch, false);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(db.prepare("SELECT count(*) AS n FROM messages").get()!.n, before);
+    db.close();
+  } finally { await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup(); }
 });

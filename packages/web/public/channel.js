@@ -3,7 +3,7 @@ import { groupMemoirSnippet } from "./memoir.js";
 import { peerCard, peerBioSnippet } from "./peers.js";
 import { h, icon, iconButton, richText, shortFp, timeShort, timeFull, autoGrow, hue, avatar, selfAvatar, youAvatar, personOf, clear, append, relTime } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
-import { S, on, isConversation, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, presenceOf } from "./state.js";
+import { S, on, isConversation, setConversation, setMessages, upsertTransfer, upsertChannel, removeChannel, markRead, peers, channelTitle, allMcpTools, workingIn, workingOf, typingIn, presenceOf } from "./state.js";
 import { markdown } from "./md.js";
 import { joinModal } from "./invites.js";
 import { inviteLinks, suppressQuietNotice } from "./chat-polish.js";
@@ -605,7 +605,8 @@ function memberRow(c, m) {
   const name = m.name ?? `${m.id.slice(0, 6)}…`;
   const av = m.me ? selfAvatar() : avatar(name, m.id);
   let status;
-  if (w) status = h("span.member-status.live", null, h("span.act.shimmer", null, activityLine(w.activity)));
+  if (typingIn(c.id).includes(m.id)) status = h("span.member-status.live", null, "typing…");
+  else if (w) status = h("span.member-status.live", null, h("span.act.shimmer", null, activityLine(w.activity)));
   else if (m.me) status = h("span.member-status", null, "this computer");
   else if (info) status = h("span.member-status", null, info.text);
   else status = h("span.member-status", null, m.name ? "presence unknown" : "has not said hello yet");
@@ -635,7 +636,10 @@ export function channelView(main, chId) {
   let historyExpansionPending = false;
   let membersOpen = wide() && membersPref();
 
+  let typingTimer, typingLast = 0, typingActive = false;
+  const stopTyping = () => { clearTimeout(typingTimer); if (typingActive) api.typing(chId, false); typingActive = false; typingLast = 0; };
   const send = async (text) => {
+    stopTyping();
     if (draftState.sending) return false;
     const c = getC();
     if (!c || c.id !== chId) return false;
@@ -770,7 +774,12 @@ export function channelView(main, chId) {
     drafts: draftBox,
     canSend: () => drafts.some((draft) => draft.status !== "sent"),
     initialText: draftState.messageText,
-    onTextChange: (value) => { draftState.messageText = value; },
+    onTextChange: (value) => {
+      draftState.messageText = value;
+      if (!value.trim()) return stopTyping();
+      if (Date.now() - typingLast >= 3000) { api.typing(chId, true); typingLast = Date.now(); typingActive = true; }
+      clearTimeout(typingTimer); typingTimer = setTimeout(stopTyping, 5000);
+    },
     isBusy: () => draftState.sending,
     onKey: (e) => completerHolder.onKey(e),
     onSend: send,
@@ -833,6 +842,15 @@ export function channelView(main, chId) {
   comp.input.setAttribute("aria-autocomplete", "list");
   comp.form.prepend(completer.el);
 
+  const typingBar = h("div.typing-bar", { role: "status" });
+  const renderTyping = () => {
+    const ids = typingIn(chId);
+    const names = ids.map(id => getC()?.members.find(m => m.id === id)?.name || "Someone");
+    typingBar.textContent = ids.length === 1 ? `${names[0]} is typing…` : ids.length === 2 ? `${names[0]} and ${names[1]} are typing…` : ids.length ? `${ids.length} people are typing…` : "";
+    renderMembers();
+  };
+  comp.input.addEventListener("blur", stopTyping);
+  comp.form.prepend(typingBar);
   main.append(header, st.el, comp.form, members);
 
   const setMembersOpen = (open, remember = true) => {
@@ -1092,6 +1110,7 @@ export function channelView(main, chId) {
     renderMembers();
   };
   renderWorking();
+  const typingExpiry = setInterval(renderTyping, 1000);
   const staleTimer = setInterval(() => {
     renderMembers(); // "seen 5m ago" ages
     if (workingIn(chId).length) renderWorking();
@@ -1111,6 +1130,7 @@ export function channelView(main, chId) {
     on(`messages:${chId}`, onMessages),
     on("transfers", onTransfer),
     on(`working:${chId}`, renderWorking),
+    on(`typing:${chId}`, renderTyping),
     on("followups", renderMembers),
     on(`conversation:${chId}`, renderMembers),
   ];
@@ -1122,6 +1142,8 @@ export function channelView(main, chId) {
   }
   return {
     destroy: () => {
+      stopTyping();
+      clearInterval(typingExpiry);
       clearInterval(staleTimer);
       draftState.renderers.delete(renderDraftsForView);
       draftState.scrollers.delete(scrollToBottom);

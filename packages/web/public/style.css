@@ -3454,3 +3454,10 @@ details[open] > summary > .icon:last-child,
 .peer-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .peer-bio { padding: 12px; overflow-wrap: anywhere; }
 .member[role="button"] { cursor: pointer; }
+
+.typing-bar { color: var(--muted, #777); font-size: 12px; min-height: 0; }
+.typing-bar:not(:empty) { padding: 4px 12px; }
+
+.typing-bar:not(:empty)::after { content: " •"; animation: typing-pulse 1.2s ease-in-out infinite; }
+@keyframes typing-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .typing-bar::after { animation: none; } }

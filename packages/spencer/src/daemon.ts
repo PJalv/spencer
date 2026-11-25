@@ -135,6 +135,7 @@ type Started = {
 export class Daemon {
   readonly dataDir: string;
   readonly events: EventBus;
+  private typingSent = new Map<string, number>();
   private opts: DaemonOptions;
   private log: (m: string) => void;
   private s: Partial<Started> = {};
@@ -467,6 +468,10 @@ export class Daemon {
       return;
     }
     if (isLinkBody(body)) { if (body.to === this.need("me").id) void this.s.links?.onSignal(ch, env.from, body); return; }
+    if (body.type === "typing") {
+      if (Date.now() - env.ts < 15_000) this.events.emit({ type: "typing", ch, from: env.from, active: body.active, ts: env.ts });
+      return;
+    }
     if (body.type !== "status" || Date.now() - env.ts >= STATUS_MAX_AGE_MS) return;
     this.events.emit({
       type: "status",
@@ -489,6 +494,10 @@ export class Daemon {
         return;
       case "chat":
         await this.routeChat(msg, body);
+        return;
+      case "typing":
+        if (Date.now() - msg.ts < 15_000) this.events.emit({ type: "typing", ch: msg.ch, from: msg.from_id, active: body.active, ts: msg.ts });
+        this.need("sql").run("DELETE FROM messages WHERE id = ?", msg.id);
         return;
       case "status":
         // Ephemeral: show it if it is fresh (not a catch-up after being offline), then forget it.
@@ -623,6 +632,18 @@ export class Daemon {
         return { id: res.id };
       },
       requestFileSend: (ch, req) => this.need("transfers").request(ch, req),
+      sendTyping(ch, active) {
+        try {
+          if (!channels.row(ch)) return;
+          const info = channels.info(ch);
+          const conn = info && daemon.s.pool?.peek(info.relayUrl);
+          if (!info || !conn?.ready || !conn.features.includes("ephemeral")) return;
+          const now = Date.now();
+          if (active && now - (daemon.typingSent.get(ch) ?? 0) < 2000) return;
+          if (active) daemon.typingSent.set(ch, now);
+          conn.request({ t: "send", env: sealEnvelope(daemon.need("me"), ch, info.encKey, { type: "typing", active }), ephemeral: true }).catch(() => {});
+        } catch {}
+      },
       sendStatus(ch, s) {
         try {
           if (!channels.row(ch) || !isB64uId(s.replyTo)) return;

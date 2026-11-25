@@ -53,3 +53,21 @@ test("autoGrow uses measured height and caps it", () => {
   autoGrow(ta);
   assert.equal(ta.style.height, "auto");
 });
+
+test("typing indicators display peers and expire", async () => {
+  const { setTyping, typingIn, clearTyping } = await import("../public/state.js");
+  const main = document.createElement("main");
+  const c = { id: "typing-test", kind: "group", members: ["Alice", "Bob", "Cara"].map(name => ({ id: name, name })), trust: "standard", autoReply: false };
+  S.channels.set(c.id, c); S.messages.set(c.id, []);
+  const view = channelView(main, c.id);
+  setTyping({ ch: c.id, from: "Alice", active: true, ts: Date.now() });
+  assert.equal(main.querySelector(".typing-bar").textContent, "Alice is typing…");
+  setTyping({ ch: c.id, from: "Bob", active: true, ts: Date.now() });
+  assert.equal(main.querySelector(".typing-bar").textContent, "Alice and Bob are typing…");
+  setTyping({ ch: c.id, from: "Cara", active: true, ts: Date.now() });
+  assert.equal(main.querySelector(".typing-bar").textContent, "3 people are typing…");
+  clearTyping(c.id, "Alice");
+  setTyping({ ch: c.id, from: "Bob", active: true, ts: Date.now() - 8000 });
+  assert.deepEqual(typingIn(c.id), ["Cara"]);
+  view.destroy();
+});
