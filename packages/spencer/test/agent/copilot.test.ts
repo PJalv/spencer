@@ -118,17 +118,21 @@ function makeModelManager(
   dir: string,
   initialModel: ModelConfig,
   extra: { copilotCliConfig?: string; copilotKeyring?: CopilotKeyring } = {},
+  conversationModel?: ModelConfig,
 ) {
-  let cfg = resolveConfig({ model: initialModel } as never);
+  let cfg = resolveConfig({ model: initialModel, ...(conversationModel ? { conversationModel } : {}) } as never);
   const saved: ModelConfig[] = [];
   const events: DaemonEvent[] = [];
   let reloads = 0;
   const core = {
     dataDir: dir,
     config: () => cfg,
-    saveModel: (m: ModelConfig) => {
-      cfg = { ...cfg, model: m };
+    saveModel: (m: ModelConfig, customProvider?: import("../../src/config.ts").CustomProviderSetup | null) => {
+      cfg = { ...cfg, model: m, ...(customProvider === undefined ? {} : customProvider ? { customProvider } : { customProvider: undefined }) };
       saved.push(m);
+    },
+    saveCustomProvider: (customProvider: import("../../src/config.ts").CustomProviderSetup | null) => {
+      cfg = { ...cfg, ...(customProvider ? { customProvider } : { customProvider: undefined }) };
     },
     events: { emit: (e: DaemonEvent) => events.push(e) },
   } as unknown as CoreServices;
@@ -144,6 +148,161 @@ function makeModelManager(
   });
   return { mm, saved, events, getReloads: () => reloads, getConfig: () => cfg };
 }
+
+test("ModelManager: provider auth changes never switch the active model", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-auth-only-"));
+  const { mm, saved, getConfig, getReloads } = makeModelManager(dir, { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+  try {
+    await mm.init();
+    const initial = mm.status();
+    const activeModel = { provider: initial.provider, modelId: initial.modelId };
+    const openai = initial.providers!.find((provider) => provider.id === "openai")!;
+
+    const savedAuth = await mm.setProviderAuth("openai", { apiKey: "synthetic-openai-key" });
+    assert.deepEqual({ provider: savedAuth.provider, modelId: savedAuth.modelId }, activeModel);
+    assert.equal(savedAuth.providers?.find((provider) => provider.id === "openai")?.hasSavedKey, true);
+    assert.deepEqual(getConfig().model, { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 0);
+
+    const removed = await mm.setProviderAuth("openai", { clearApiKey: true });
+    assert.deepEqual({ provider: removed.provider, modelId: removed.modelId }, activeModel);
+    assert.equal(removed.providers?.find((provider) => provider.id === "openai")?.hasSavedKey, false);
+    assert.equal(await mm.credentials.read("openai"), undefined);
+    assert.deepEqual(getConfig().model, { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 0);
+
+    const activeAuth = await mm.setProviderAuth("anthropic", { apiKey: "synthetic-active-provider-key" });
+    assert.deepEqual({ provider: activeAuth.provider, modelId: activeAuth.modelId }, activeModel);
+    assert.deepEqual(getConfig().model, { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+    assert.equal(activeAuth.providers?.find((provider) => provider.id === "anthropic")?.hasSavedKey, true);
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 1, "active credentials reload the runtime without selecting a different model");
+
+    const activeKeyRemoved = await mm.setProviderAuth("anthropic", { clearApiKey: true });
+    assert.deepEqual({ provider: activeKeyRemoved.provider, modelId: activeKeyRemoved.modelId }, activeModel);
+    assert.deepEqual(getConfig().model, { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 2);
+
+    const switched = await mm.setModel("openai", openai.models[0]!.id);
+    assert.equal(switched.provider, "openai", "only the explicit model-switch operation changes the model");
+    assert.equal(getReloads(), 3);
+  } finally {
+    mm.stop();
+  }
+});
+
+test("ModelManager: provider auth refreshes a separately configured Conversations model", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-conversation-auth-"));
+  const envName = "SPENCER_TEST_CONVERSATION_KEY";
+  const previous = process.env[envName];
+  const previousMainKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env[envName];
+  process.env.ANTHROPIC_API_KEY = "synthetic-main-key";
+  const main = { provider: "anthropic", modelId: "claude-sonnet-5-5" };
+  const conversation = { provider: "openai", modelId: "gpt-4o", apiKeyEnv: envName };
+  const { mm, getConfig, getReloads, saved } = makeModelManager(dir, main, {}, conversation);
+  try {
+    await mm.init();
+    assert.equal(mm.status().conversation?.ready, false);
+    assert.deepEqual(mm.conversationRef(), { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+
+    const configured = await mm.setProviderAuth("openai", { apiKey: "synthetic-conversation-key" });
+    assert.equal(configured.conversation?.ready, true);
+    assert.deepEqual(mm.conversationRef(), { provider: "openai", modelId: "gpt-4o" });
+    assert.deepEqual({ provider: configured.provider, modelId: configured.modelId }, main);
+    assert.deepEqual(getConfig().model, main);
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 1, "credentials for the Conversations provider rebuild the runtime");
+
+    const removed = await mm.setProviderAuth("openai", { clearApiKey: true });
+    assert.equal(removed.conversation?.ready, false);
+    assert.deepEqual(mm.conversationRef(), { provider: "anthropic", modelId: "claude-sonnet-5-5" });
+    assert.deepEqual({ provider: removed.provider, modelId: removed.modelId }, main);
+    assert.deepEqual(getConfig().model, main);
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 2, "removing Conversations credentials also rebuilds the runtime");
+  } finally {
+    mm.stop();
+    if (previous === undefined) delete process.env[envName];
+    else process.env[envName] = previous;
+    if (previousMainKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousMainKey;
+  }
+});
+
+test("ModelManager: custom endpoint Auth setup is remembered independently from model selection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-custom-auth-only-"));
+  const envName = "SPENCER_TEST_CUSTOM_AUTH_KEY";
+  const previous = process.env[envName];
+  process.env[envName] = "synthetic-custom-env-key";
+  const active = { provider: "anthropic", modelId: "claude-sonnet-5-5" };
+  const { mm, getConfig, getReloads, saved } = makeModelManager(dir, active);
+  try {
+    await mm.init();
+    const endpoint = "https://models.example.test/auth-only/v1";
+    const configured = await mm.setProviderAuth("openai-compatible", { baseUrl: endpoint, apiKeyEnv: envName });
+    assert.deepEqual({ provider: configured.provider, modelId: configured.modelId }, active);
+    assert.deepEqual(getConfig().model, active);
+    assert.deepEqual(saved, []);
+    assert.equal(getReloads(), 0, "non-active auth setup does not rebuild the runtime");
+    assert.deepEqual(configured.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup, {
+      baseUrl: endpoint, apiKeyEnv: envName, authMode: "credentialed", ready: true,
+    });
+    assert.equal(process.env[envName], "synthetic-custom-env-key");
+
+    const keyless = await mm.setProviderAuth("openai-compatible", { baseUrl: endpoint, clearApiKeyEnv: true });
+    assert.equal(keyless.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup?.authMode, "keyless");
+    assert.equal(keyless.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup?.ready, true);
+    assert.equal(process.env[envName], "synthetic-custom-env-key", "forgetting the association does not alter the environment");
+    assert.deepEqual(getConfig().model, active);
+
+    const switched = await mm.setModel("openai-compatible", "synthetic-model", { baseUrl: endpoint });
+    assert.equal(switched.provider, "openai-compatible", "only explicit model selection switches the active model");
+    assert.equal(switched.baseUrl, endpoint);
+    assert.equal(switched.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup?.authMode, "keyless");
+  } finally {
+    mm.stop();
+    if (previous === undefined) delete process.env[envName];
+    else process.env[envName] = previous;
+  }
+});
+
+test("ModelManager: switching models honors a saved keyless custom endpoint over the old env-key reference", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spencer-mm-keyless-switch-"));
+  const envName = "SPENCER_TEST_CUSTOM_EXISTING_ENV_KEY";
+  const previous = process.env[envName];
+  process.env[envName] = "synthetic-existing-env-key";
+  const endpoint = "https://models.example.test/keyless-switch/v1";
+  const active: ModelConfig = { provider: "openai-compatible", baseUrl: endpoint, modelId: "existing-model", apiKeyEnv: envName };
+  const { mm, getConfig } = makeModelManager(dir, active);
+  try {
+    await mm.init();
+    assert.equal(mm.status().ready, true);
+
+    const keyless = await mm.setProviderAuth("openai-compatible", { baseUrl: endpoint, clearApiKeyEnv: true });
+    const setup = keyless.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup;
+    assert.equal(setup?.authMode, "keyless");
+    assert.equal(setup?.apiKeyEnv, undefined);
+    assert.deepEqual(getConfig().model, active, "saving Auth setup does not rewrite the active model");
+
+    const switched = await mm.setModel("openai-compatible", "next-model", { baseUrl: endpoint });
+    assert.equal(switched.modelId, "next-model");
+    assert.equal(switched.apiKeyEnv, undefined, "model switch does not restore the old environment-key reference");
+    assert.equal(switched.ready, true);
+    const finalSetup = switched.providers?.find((provider) => provider.id === "openai-compatible")?.customSetup;
+    assert.equal(finalSetup?.authMode, "keyless");
+    assert.equal(finalSetup?.apiKeyEnv, undefined);
+    assert.equal(process.env[envName], "synthetic-existing-env-key", "keyless setup does not mutate the environment");
+    assert.deepEqual(getConfig().model, { provider: "openai-compatible", baseUrl: endpoint, modelId: "next-model" });
+  } finally {
+    mm.stop();
+    if (previous === undefined) delete process.env[envName];
+    else process.env[envName] = previous;
+  }
+});
 
 test("ModelManager: lists providers, switches live with saved API key, and clears key", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spencer-mm-"));
@@ -205,7 +364,7 @@ test("ModelManager: lists providers, switches live with saved API key, and clear
     assert.equal(st4.ready, true);
     assert.equal(st4.provider, "openai-compatible");
     assert.equal(st4.modelId, "llama3.1");
-    assert.equal(st4.baseUrl, "http://localhost:11434/v1");
+    assert.equal(st4.baseUrl, "http://localhost:11434/v1/");
     assert.equal(st4.thinking, "low");
 
     // Validation errors.
@@ -363,7 +522,7 @@ test("ModelManager reuses the GitHub Copilot CLI sign-in (GitHub's own client, f
       : { data: [{ id: "claude-sonnet-5.5", name: "Claude Sonnet 5.5", model_picker_enabled: true, capabilities: { type: "chat", supports: { tool_calls: true } } }] };
     return new Response(JSON.stringify(body), { status: 200 });
   });
-  const { mm } = makeModelManager(dir, { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" }, { copilotCliConfig: cliConfig });
+  const { mm, saved: modelSaves, getConfig } = makeModelManager(dir, { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" }, { copilotCliConfig: cliConfig });
   try {
     await mm.init();
     assert.deepEqual(mm.status().copilot.cliAccounts, ["alice"]);
@@ -373,11 +532,19 @@ test("ModelManager reuses the GitHub Copilot CLI sign-in (GitHub's own client, f
     assert.equal(st.copilot.connected, true);
     assert.equal(st.copilot.via, "copilot-cli");
     assert.deepEqual(st.copilot.models.map((m) => m.id), ["claude-sonnet-5.5"]);
-    assert.equal(st.provider, COPILOT_PROVIDER);
+    assert.equal(st.provider, COPILOT_PROVIDER, "Copilot sign-in selects a model when the current model is not ready");
     assert.equal(st.modelId, "claude-sonnet-5.5");
+    const selected = { provider: COPILOT_PROVIDER, modelId: "claude-sonnet-5.5", thinking: "medium" };
+    assert.deepEqual(modelSaves, [selected]);
+    assert.deepEqual(getConfig().model, selected);
+
+    const refreshed = await mm.refreshCopilotModels();
+    assert.equal(refreshed.provider, COPILOT_PROVIDER);
+    assert.equal(refreshed.modelId, "claude-sonnet-5.5");
+    assert.deepEqual(modelSaves, [selected], "refresh retains the available active Copilot model");
     assert.ok(auths.length > 0 && auths.every((a) => a === `Bearer ${cliToken}`));
-    const saved = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
-    assert.ok(isCopilotCredential(saved) && saved.source === "copilot-cli" && saved.access === cliToken);
+    const credential = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
+    assert.ok(isCopilotCredential(credential) && credential.source === "copilot-cli" && credential.access === cliToken);
   } finally {
     mm.stop();
   }
@@ -424,7 +591,7 @@ test("ModelManager reuses Copilot CLI sign-in stored in OS keyring (loggedInUser
         };
     return new Response(JSON.stringify(body), { status: 200 });
   });
-  const { mm } = makeModelManager(
+  const { mm, saved: modelSaves, getConfig } = makeModelManager(
     dir,
     { provider: "anthropic", modelId: "claude-sonnet-5-5", apiKeyEnv: "ANTHROPIC_API_KEY" },
     { copilotCliConfig: cliConfig, copilotKeyring: keyring },
@@ -439,9 +606,12 @@ test("ModelManager reuses Copilot CLI sign-in stored in OS keyring (loggedInUser
     assert.equal(st.copilot.connected, true);
     assert.equal(st.copilot.via, "copilot-cli");
     assert.equal(st.copilot.login, "biz-user");
+    assert.equal(st.provider, COPILOT_PROVIDER);
     assert.equal(st.modelId, "gpt-6-luna");
-    const saved = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
-    assert.ok(isCopilotCredential(saved) && saved.source === "copilot-cli" && saved.access === cliToken);
+    assert.deepEqual(modelSaves, [{ provider: COPILOT_PROVIDER, modelId: "gpt-6-luna" }]);
+    assert.deepEqual(getConfig().model, { provider: COPILOT_PROVIDER, modelId: "gpt-6-luna" });
+    const credential = await new FileCredentialStore(dir).read(COPILOT_PROVIDER);
+    assert.ok(isCopilotCredential(credential) && credential.source === "copilot-cli" && credential.access === cliToken);
   } finally {
     mm.stop();
   }

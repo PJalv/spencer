@@ -8,6 +8,47 @@ export type P2pConfig = { mode: "files" | "off"; hideLocalAddresses: boolean; mi
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
+export type CustomProviderAuthMode = "keyless" | "credentialed" | "unavailable";
+
+/** Non-secret remembered endpoint setup. The URL path is routing data and is not inspected for embedded credentials. */
+export interface CustomProviderSetup {
+  baseUrl: string;
+  modelId?: string;
+  apiKeyEnv?: string;
+  authMode: CustomProviderAuthMode;
+  ready: boolean;
+}
+
+/** Keep only HTTP(S) endpoints without userinfo, query strings, or fragments; retain the exact path. */
+export function rememberableCustomProviderSetup(value: unknown): CustomProviderSetup | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.baseUrl !== "string" ||
+    (raw.modelId !== undefined && (typeof raw.modelId !== "string" || !raw.modelId.trim())) ||
+    typeof raw.ready !== "boolean" ||
+    !["keyless", "credentialed", "unavailable"].includes(String(raw.authMode))
+  ) return undefined;
+  const baseUrl = raw.baseUrl.trim();
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { return undefined; }
+  const authority = baseUrl.match(/^[a-z][a-z\d+.-]*:(?:\/\/)?([^/?#]*)/i)?.[1];
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") || !authority || authority.includes("@") ||
+    url.username || url.password || baseUrl.includes("?") || baseUrl.includes("#")
+  ) return undefined;
+  const apiKeyEnv = typeof raw.apiKeyEnv === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(raw.apiKeyEnv)
+    ? raw.apiKeyEnv
+    : undefined;
+  return {
+    baseUrl: raw.baseUrl.trim(),
+    ...(typeof raw.modelId === "string" && raw.modelId.trim() ? { modelId: raw.modelId.trim() } : {}),
+    ...(raw.authMode === "credentialed" && apiKeyEnv ? { apiKeyEnv } : {}),
+    authMode: raw.authMode as CustomProviderAuthMode,
+    ready: raw.ready,
+  };
+}
+
 export type ModelConfig =
   | { provider: "fake" }
   /** Built-in pi-ai provider id (anthropic, openai, openrouter, google, xai, groq, …). */
@@ -79,6 +120,8 @@ export interface SpencerConfig {
   p2p: P2pConfig;
   http: { host: "127.0.0.1"; port: number };
   model: ModelConfig;
+  /** Non-secret remembered custom endpoint setup; separate from the active model. */
+  customProvider?: CustomProviderSetup;
   /** The model Conversations channels use (they run often and can use many tokens). Absent: the main model. */
   conversationModel?: ModelConfig;
   /** Experimental features (SOUL.md and Conversations channels). Off by default. */
@@ -140,12 +183,14 @@ export function defaultDataDir(): string {
 /** Merge a user config over defaults. Unknown keys are kept out. */
 export function resolveConfig(raw: Partial<SpencerConfig> & Record<string, unknown>): SpencerConfig {
   const d = defaultConfig();
+  const customProvider = rememberableCustomProviderSetup(raw.customProvider);
   const cfg: SpencerConfig = {
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim().slice(0, 100) : d.name,
     relay: typeof raw.relay === "string" ? raw.relay : d.relay,
     p2p: { ...d.p2p, ...(raw.p2p ?? {}) },
     http: { host: "127.0.0.1", port: Number(raw.http?.port ?? d.http.port) },
     model: (raw.model as ModelConfig) ?? d.model,
+    ...(customProvider ? { customProvider } : {}),
     croc: { ...d.croc, ...(raw.croc ?? {}) },
     mcpServers: (raw.mcpServers as Record<string, McpServerConfig>) ?? {},
     policy: { ...d.policy, ...(raw.policy ?? {}) },

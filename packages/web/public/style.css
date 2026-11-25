@@ -3318,6 +3318,9 @@ details[open] > summary > .icon:last-child,
 .model-pick-label.sm {
   flex: 0 1 10rem;
 }
+.model-disabled {
+  opacity: 0.55;
+}
 .model-pick-stack {
   display: grid;
   gap: 8px;

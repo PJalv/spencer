@@ -12,7 +12,7 @@ import type { Memoir } from "./memoir.ts";
  */
 import type { DatabaseSync } from "node:sqlite";
 import type { ChatBody, ConvoRef, CrocInfo, FileBody, Identity, StatusState } from "@spencer/protocol";
-import type { McpServerConfig, ModelConfig, SpencerConfig, Policy } from "./config.ts";
+import type { CustomProviderSetup, McpServerConfig, ModelConfig, SpencerConfig, Policy } from "./config.ts";
 
 // ---------------------------------------------------------------- API shapes
 
@@ -401,8 +401,10 @@ export interface CoreServices {
   db: DatabaseSync;
   dataDir: string;
   config: () => SpencerConfig;
-  /** Persist a new model choice to config.json (the model page). */
-  saveModel?(model: ModelConfig): void;
+  /** Persist a model choice and remembered custom provider setup in config.json. */
+  saveModel?(model: ModelConfig, customProvider?: CustomProviderSetup | null): void;
+  /** Persist custom endpoint setup without changing the active model. */
+  saveCustomProvider?(customProvider: CustomProviderSetup | null): void;
   /** Persist the Conversations model (`undefined`: use the main model). */
   saveConversationModel?(model: ModelConfig | undefined): void;
   me(): { id: string; name: string; fingerprint: string };
@@ -474,6 +476,8 @@ export interface AgentService {
   modelStatus?(): ModelStatus | undefined;
   /** Latest model status. */
   refreshModelStatus?(): Promise<ModelStatus>;
+  /** Save credentials or endpoint setup without selecting or reconfiguring the active model. */
+  setProviderAuth?(provider: string, opts?: ProviderAuthOptions): Promise<ModelStatus>;
   /** Switch the model (persisted to config.json; optional API key saved in secrets/credentials.json mode 0600). */
   setModel?(provider: string, modelId: string, opts?: SetModelOptions): Promise<ModelStatus>;
   /** Start "Sign in with GitHub" for Copilot; progress arrives as `model` events. */
@@ -533,16 +537,21 @@ export interface LoginState {
   error?: string;
 }
 
-export interface SetModelOptions {
-  thinking?: "off" | "minimal" | "low" | "medium" | "high";
+export interface ProviderAuthOptions {
   /** Optional API key saved in `<dataDir>/secrets/credentials.json` (mode 0600; never written to config.json). */
   apiKey?: string;
   /** Delete any saved API key for this provider. */
   clearApiKey?: boolean;
-  /** Optional env var name for the API key (saved in config.json). */
+  /** Optional env var name for the custom endpoint's API key (saved in config.json). */
   apiKeyEnv?: string;
-  /** Optional base URL (required for `openai-compatible`). */
+  /** Forget the custom endpoint's env-var association without changing the environment. */
+  clearApiKeyEnv?: boolean;
+  /** Endpoint to remember without selecting a model (openai-compatible only). */
   baseUrl?: string;
+}
+
+export interface SetModelOptions extends ProviderAuthOptions {
+  thinking?: "off" | "minimal" | "low" | "medium" | "high";
 }
 
 export interface ModelProviderOption {
@@ -552,6 +561,7 @@ export interface ModelProviderOption {
   hasEnvKey?: boolean;
   hasSavedKey?: boolean;
   custom?: boolean;
+  customSetup?: CustomProviderSetup;
   models: { id: string; name: string; reasoning?: boolean }[];
 }
 
