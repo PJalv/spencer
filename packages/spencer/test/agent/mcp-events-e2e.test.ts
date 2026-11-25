@@ -385,3 +385,30 @@ test("channel event watch paused by turn budget drains once owner resets budget 
     core.cleanup();
   }
 });
+
+test("protocol discovery error (-32602) reports status error (not unsupported), distinguishes schedule_followup error, and recovers on re-probe", async () => {
+  const h = await harness({
+    discoverError: { httpStatus: 400, code: -32602, message: "Required request metadata is missing" },
+  });
+  try {
+    const status = h.agent.mcpStatus().find((s) => s.name === "t3code");
+    assert.equal(status?.status, "connected");
+    assert.equal(status?.events?.status, "error");
+    assert.match(status?.events?.error ?? "", /Required request metadata is missing/);
+
+    await h.tool("schedule_followup", schedule());
+    assert.equal(h.agent.listFollowups().length, 0);
+    assert.match(h.requests.at(-1)!.text, /MCP Events discovery failed for t3code/);
+    assert.doesNotMatch(h.requests.at(-1)!.text, /does not support MCP Events/);
+
+    // Once the server recovers, the next schedule_followup re-probes and succeeds without needing a reconnect.
+    h.server.setDiscoverError(undefined);
+    const id = await h.watch();
+    assert.equal(h.agent.mcpStatus().find((s) => s.name === "t3code")?.events?.status, "supported");
+    h.server.emit("thread.run_settled", { threadId: "th-1" });
+    await h.wakes(id, 1);
+    assert.equal(h.reads.length, 1);
+  } finally {
+    await h.close();
+  }
+});

@@ -27,12 +27,14 @@ test('HTTP T3 Code keeps its configuration and displays semantic event status pi
       t3code: { url: 'http://localhost:1234/mcp' },
       revokedSrv: { url: 'http://localhost:1235/mcp' },
       errSrv: { url: 'http://localhost:1236/mcp' },
+      offSrv: { url: 'http://localhost:1237/mcp' },
     },
     presets: [{ name: 't3code', config: { command: 't3code', args: ['mcp'] } }],
     servers: [
       { name: 't3code', status: 'connected', transport: 'http', tools: [], events: { status: 'supported', eventCount: 3 } },
       { name: 'revokedSrv', status: 'error', transport: 'http', tools: [], events: { status: 'revoked', error: '401' } },
-      { name: 'errSrv', status: 'error', transport: 'http', tools: [], events: { status: 'error', error: '503' } },
+      { name: 'errSrv', status: 'connected', transport: 'http', tools: [], events: { status: 'error', error: 'MCP Events discovery failed: HTTP 400: Required request metadata is missing' } },
+      { name: 'offSrv', status: 'connected', transport: 'http', tools: [], events: { status: 'unsupported', error: 'Server does not advertise the io.modelcontextprotocol/events extension.' } },
     ],
   });
   const root = document.createElement('main');
@@ -42,9 +44,16 @@ test('HTTP T3 Code keeps its configuration and displays semantic event status pi
   assert.match(root.textContent, /events: 3/);
   assert.match(root.textContent, /events: revoked/);
   assert.match(root.textContent, /events: error/);
+  assert.match(root.textContent, /events: off/);
   assert.ok(root.querySelector('.pill.ok'));
   assert.ok(root.querySelector('.pill.bad'));
   assert.ok(root.querySelector('.pill.attn'));
+  const errCard = root.querySelector('section[aria-label="errSrv"]');
+  assert.ok(errCard);
+  assert.match(errCard.querySelector('.xfer-error')?.textContent ?? '', /Required request metadata is missing/);
+  const offCard = root.querySelector('section[aria-label="offSrv"]');
+  assert.ok(offCard);
+  assert.equal(offCard.querySelector('.xfer-error'), null);
   assert.doesNotMatch(root.textContent, /Switch to local T3 Code bridge/);
   view.destroy();
   root.remove();

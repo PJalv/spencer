@@ -377,7 +377,7 @@ export class SpencerAgent implements AgentService {
       if (this.stopping || this.eventDiscovery.get(name) !== entry) return discovery;
       entry.discovery = discovery;
       const status: McpServerEventsStatus = {
-        status: discovery.supported ? "supported" : discovery.revoked ? "revoked" : discovery.transient ? "error" : "unsupported",
+        status: discovery.status,
         protocolVersion: discovery.protocolVersion,
         serverIdentity: discovery.serverIdentity,
         legacyFallback: discovery.legacyFallback,
@@ -502,7 +502,7 @@ export class SpencerAgent implements AgentService {
     const config = this.mcp?.serverConfig(serverName);
     reason = config ? this.eventPreview(reason, config) : this.eventPreview(reason, { command: "" });
     const cached = this.eventDiscovery.get(serverName);
-    if (cached) cached.discovery = { ...cached.discovery, supported: false, revoked: true, events: cached.discovery?.events ?? [], error: reason };
+    if (cached) cached.discovery = { ...cached.discovery, status: "revoked", supported: false, revoked: true, transient: undefined, events: cached.discovery?.events ?? [], error: reason };
     for (const sub of this.followups.activeSubscriptions(serverName)) this.followups.setSubscriptionState(sub.id, "revoked", reason);
     await this.stopStreamsForServer(serverName);
     this.mcp?.markRevoked(serverName, reason);
@@ -1322,10 +1322,15 @@ export class SpencerAgent implements AgentService {
         if (!ch || !await this.channelCanUseMcpServer(ch, server)) return fail(`Policy violation: MCP server ${server} is not enabled for this channel.`);
       }
       const sig = JSON.stringify({ url: cfg.url, headers: cfg.headers ?? {} });
-      const forceProbe = Boolean(this.eventDiscovery.get(server)?.discovery?.transient);
+      const cachedDiscovery = this.eventDiscovery.get(server)?.discovery;
+      const forceProbe = Boolean(cachedDiscovery?.transient || cachedDiscovery?.status === "error");
       const discovery = await this.probeServerEvents(server, cfg, sig, forceProbe);
       if (this.stopping) return fail("agent is stopping");
       if (discovery.revoked) return fail(`MCP server ${server} authorization is revoked: ${discovery.error ?? "unauthorized"}`);
+      if (discovery.status === "error") {
+        const detail = discovery.error?.replace(/^MCP Events discovery failed:\s*/i, "") || "unknown error";
+        return fail(`MCP Events discovery failed for ${server}: ${detail}`);
+      }
       if (!discovery.supported) return fail(`MCP server ${server} does not support MCP Events: ${discovery.error ?? "incompatible protocol or capability"}`);
       const events: { name: string; argsJson: string }[] = [];
       const seen = new Set<string>();

@@ -30,6 +30,15 @@ export interface FakeEventsMcpServerOptions {
   nextPollMs?: number;
   /** Enforce a required `mcp-param-<header>` check on `events/stream` / `events/poll`. */
   requiredHeaderParam?: { arg: string; header: string };
+  /** Force `server/discover` to fail with a JSON-RPC / HTTP error (for testing discovery errors). */
+  discoverError?: { httpStatus?: number; code: number; message: string; data?: Record<string, unknown> };
+}
+
+function decodeMcpRoutingHeader(value: string): string {
+  if (value.startsWith("=?base64?") && value.endsWith("?=")) {
+    return Buffer.from(value.slice("=?base64?".length, -"?=".length), "base64").toString("utf8");
+  }
+  return value;
 }
 
 interface StreamClient {
@@ -120,6 +129,7 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
   let sequence = 0;
   let buffer: BufferedEvent[] = [];
   let requiredHeaderParam = options.requiredHeaderParam;
+  let discoverError = options.discoverError;
   const heartbeatMs = options.heartbeatMs ?? 30_000;
   const bufferSize = options.bufferSize ?? 100;
 
@@ -193,6 +203,33 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
       res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id ?? null, error: { code, message, ...(data ? { data } : {}) } }));
     };
 
+    const validateStateless2026Request = (): boolean => {
+      const mcpMethod = req.headers["mcp-method"];
+      if (mcpMethod !== body.method) {
+        replyError(400, -32020, `Mcp-Method header mismatch (expected ${String(body.method)}, got ${String(mcpMethod ?? "missing")})`);
+        return false;
+      }
+      const meta = p && typeof p === "object" && !Array.isArray(p) && p._meta && typeof p._meta === "object" && !Array.isArray(p._meta)
+        ? (p._meta as Record<string, unknown>)
+        : undefined;
+      const metaVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
+      if (typeof metaVersion !== "string" || !metaVersion) {
+        replyError(400, -32602, "Required request metadata is missing");
+        return false;
+      }
+      const headerVersion = req.headers["mcp-protocol-version"];
+      if (typeof headerVersion === "string" && headerVersion !== metaVersion) {
+        replyError(400, -32020, `Mcp-Protocol-Version header mismatch (${headerVersion} !== ${metaVersion})`);
+        return false;
+      }
+      const clientCaps = meta?.["io.modelcontextprotocol/clientCapabilities"];
+      if (!clientCaps || typeof clientCaps !== "object" || Array.isArray(clientCaps)) {
+        replyError(400, -32602, "io.modelcontextprotocol/clientCapabilities request metadata is required");
+        return false;
+      }
+      return true;
+    };
+
     const p = body.params ?? {};
     switch (body.method) {
       case "notifications/initialized":
@@ -223,6 +260,11 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
         return;
       }
       case "server/discover": {
+        if (discoverError) {
+          replyError(discoverError.httpStatus ?? 400, discoverError.code, discoverError.message, discoverError.data);
+          return;
+        }
+        if (!validateStateless2026Request()) return;
         const supportedVersions = options.supportedVersions ?? (options.protocolVersion ? [options.protocolVersion] : ["2026-07-28", "2025-11-25"]);
         const capabilities: Record<string, unknown> = { tools: {} };
         if (!options.omitEventsCapability) {
@@ -246,6 +288,7 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
         return;
       }
       case "events/list": {
+        if (!validateStateless2026Request()) return;
         if (options.omitEventsCapability) return replyError(404, -32601, "Method not found");
         const start = Number(p.cursor ?? 0);
         const size = options.pageSize ?? events.length;
@@ -258,18 +301,22 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
         return;
       }
       case "events/stream": {
+        if (!validateStateless2026Request()) return;
         const descriptor = events.find((e) => e.name === p.name) as { delivery?: string[] } | undefined;
         if (!descriptor) return replyError(200, -32023, "Unknown event", { kind: "event" });
         if (!descriptor.delivery?.includes("push")) {
           return replyError(200, -32026, "Push not supported", { feature: "deliveryMode", value: "push" });
         }
-        if (req.headers["mcp-name"] === undefined) {
-          return replyError(400, -32020, "Missing Mcp-Name header");
+        if (typeof req.headers["mcp-name"] !== "string" || decodeMcpRoutingHeader(req.headers["mcp-name"]) !== String(p.name)) {
+          return replyError(400, -32020, "Missing or mismatched Mcp-Name header");
         }
         const args = (p.arguments ?? {}) as Record<string, unknown>;
         if (requiredHeaderParam && requiredHeaderParam.arg in args) {
           const got = req.headers[`mcp-param-${requiredHeaderParam.header.toLowerCase()}`];
-          if (got !== String(args[requiredHeaderParam.arg])) {
+          const expected = typeof args[requiredHeaderParam.arg] === "string"
+            ? String(args[requiredHeaderParam.arg])
+            : JSON.stringify(args[requiredHeaderParam.arg]);
+          if (typeof got !== "string" || decodeMcpRoutingHeader(got) !== expected) {
             return replyError(400, -32020, "Mcp-Param header mismatch");
           }
         }
@@ -305,15 +352,25 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
         return;
       }
       case "events/poll": {
+        if (!validateStateless2026Request()) return;
         const descriptor = events.find((e) => e.name === p.name) as { delivery?: string[] } | undefined;
         if (!descriptor) return replyError(200, -32023, "Unknown event", { kind: "event" });
         if (!descriptor.delivery?.includes("poll")) {
           return replyError(200, -32026, "Poll not supported", { feature: "deliveryMode", value: "poll" });
         }
-        if (req.headers["mcp-name"] === undefined) {
-          return replyError(400, -32020, "Missing Mcp-Name header");
+        if (typeof req.headers["mcp-name"] !== "string" || decodeMcpRoutingHeader(req.headers["mcp-name"]) !== String(p.name)) {
+          return replyError(400, -32020, "Missing or mismatched Mcp-Name header");
         }
         const args = (p.arguments ?? {}) as Record<string, unknown>;
+        if (requiredHeaderParam && requiredHeaderParam.arg in args) {
+          const got = req.headers[`mcp-param-${requiredHeaderParam.header.toLowerCase()}`];
+          const expected = typeof args[requiredHeaderParam.arg] === "string"
+            ? String(args[requiredHeaderParam.arg])
+            : JSON.stringify(args[requiredHeaderParam.arg]);
+          if (typeof got !== "string" || decodeMcpRoutingHeader(got) !== expected) {
+            return replyError(400, -32020, "Mcp-Param header mismatch");
+          }
+        }
         if (p.cursor === null || p.cursor === undefined) {
           reply({ resultType: "complete", events: [], cursor: cursorStr(), truncated: false, hasMore: false, nextPollMs: options.nextPollMs ?? 50 });
           return;
@@ -356,6 +413,9 @@ export async function createEventsMcpServer(options: FakeEventsMcpServerOptions 
     },
     setRequiredHeaderParam(param: { arg: string; header: string } | undefined) {
       requiredHeaderParam = param;
+    },
+    setDiscoverError(err: FakeEventsMcpServerOptions["discoverError"]) {
+      discoverError = err;
     },
     emit(name: string, data: Record<string, unknown>, opts: { eventId?: string; timestamp?: string; duplicateOf?: BufferedEvent } = {}): BufferedEvent {
       const seq = ++sequence;

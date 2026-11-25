@@ -251,6 +251,9 @@ export function mcpView(main) {
           ),
           saved ? h("p.mcp-cmdline", { title: describe(saved) }, describe(saved)) : null,
           s.error ? h("p.xfer-error", null, s.error) : null,
+          !s.error && s.events?.error && (s.events.status === "error" || s.events.status === "revoked")
+            ? h("p.xfer-error", null, /mcp events/i.test(s.events.error) ? s.events.error : `MCP Events: ${s.events.error}`)
+            : null,
           s.tools?.length
             ? h(
                 "ul.mcp-tools",

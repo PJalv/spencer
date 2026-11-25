@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createEventsMcpServer } from "./fixtures/events-mcp-server.ts";
 import {
+  MCP_CLIENT_CAPABILITIES_META_KEY,
+  MCP_CLIENT_INFO_META_KEY,
+  MCP_EVENTS_EXTENSION_ID,
   MCP_EVENTS_PROTOCOL_VERSION,
+  MCP_PROTOCOL_VERSION_META_KEY,
   discoverMcpEvents,
   encodeMcpRoutingHeader,
   openMcpEventSubscription,
@@ -46,6 +50,7 @@ test("discoverMcpEvents: paginates events/list, parses x-mcp-header, skips inval
   const warnings: string[] = [];
   try {
     const found = await discoverMcpEvents({ url: server.url, headers: { Origin: "https://evil.example" } }, { log: (m) => warnings.push(m) });
+    assert.equal(found.status, "supported");
     assert.equal(found.supported, true);
     assert.equal(found.protocolVersion, MCP_EVENTS_PROTOCOL_VERSION);
     assert.equal(found.legacyFallback, undefined);
@@ -63,8 +68,22 @@ test("discoverMcpEvents: paginates events/list, parses x-mcp-header, skips inval
     assert.equal(discoverReq.headers["mcp-method"], "server/discover");
     assert.equal(discoverReq.headers["mcp-name"], undefined);
     assert.equal(discoverReq.headers.origin, undefined);
+    assert.equal(discoverReq.body.params._meta[MCP_PROTOCOL_VERSION_META_KEY], MCP_EVENTS_PROTOCOL_VERSION);
+    assert.deepEqual(discoverReq.body.params._meta[MCP_CLIENT_CAPABILITIES_META_KEY], {
+      extensions: { [MCP_EVENTS_EXTENSION_ID]: {} },
+    });
+    assert.equal(discoverReq.body.params._meta[MCP_CLIENT_INFO_META_KEY]?.name, "spencer");
+    assert.ok(typeof discoverReq.body.params._meta[MCP_CLIENT_INFO_META_KEY]?.version === "string");
+
+    const listReq = server.requestLog.find((r) => r.method === "events/list")!;
+    assert.equal(listReq.body.params._meta[MCP_PROTOCOL_VERSION_META_KEY], MCP_EVENTS_PROTOCOL_VERSION);
+    assert.deepEqual(listReq.body.params._meta[MCP_CLIENT_CAPABILITIES_META_KEY], {
+      extensions: { [MCP_EVENTS_EXTENSION_ID]: {} },
+    });
+    assert.equal(listReq.body.params._meta[MCP_CLIENT_INFO_META_KEY]?.name, "spencer");
 
     const legacyFound = await discoverMcpEvents({ url: legacy.url });
+    assert.equal(legacyFound.status, "supported");
     assert.equal(legacyFound.supported, true);
     assert.equal(legacyFound.legacyFallback, true);
     assert.equal(legacyFound.events.length, 3);
@@ -74,20 +93,26 @@ test("discoverMcpEvents: paginates events/list, parses x-mcp-header, skips inval
   }
 });
 
-test("discoverMcpEvents: rejects stdio, incompatible protocol version, missing capability, and revoked tokens with redacted errors", async () => {
+test("discoverMcpEvents: classifies unsupported vs revoked vs protocol/transient errors accurately and redacts secrets", async () => {
   const stdio = await discoverMcpEvents({ command: "echo" });
+  assert.equal(stdio.status, "unsupported");
   assert.equal(stdio.supported, false);
   assert.match(stdio.error ?? "", /HTTP MCP server/i);
 
   const oldServer = await createEventsMcpServer({ supportedVersions: ["2025-11-25"] });
   const noCapServer = await createEventsMcpServer({ omitEventsCapability: true });
   const authServer = await createEventsMcpServer({ authToken: "topsecret-token-123" });
+  const missingMetaServer = await createEventsMcpServer({
+    discoverError: { httpStatus: 400, code: -32602, message: "Required request metadata is missing" },
+  });
   try {
     const oldRes = await discoverMcpEvents({ url: oldServer.url });
+    assert.equal(oldRes.status, "unsupported");
     assert.equal(oldRes.supported, false);
     assert.match(oldRes.error ?? "", /2026-07-28/);
 
     const noCapRes = await discoverMcpEvents({ url: noCapServer.url });
+    assert.equal(noCapRes.status, "unsupported");
     assert.equal(noCapRes.supported, false);
     assert.match(noCapRes.error ?? "", /io\.modelcontextprotocol\/events/);
 
@@ -95,20 +120,62 @@ test("discoverMcpEvents: rejects stdio, incompatible protocol version, missing c
       url: `${authServer.url}?api_key=querysecret999`,
       headers: { Authorization: "Bearer wrong-secret-token-abc" },
     });
+    assert.equal(badAuth.status, "revoked");
     assert.equal(badAuth.supported, false);
     assert.equal(badAuth.revoked, true);
     assert.doesNotMatch(badAuth.error ?? "", /wrong-secret-token-abc|querysecret999/);
+
+    // HTTP 400 with JSON-RPC -32602 is a discovery error, NOT "unsupported".
+    const metaErr = await discoverMcpEvents({ url: missingMetaServer.url });
+    assert.equal(metaErr.status, "error");
+    assert.equal(metaErr.supported, false);
+    assert.equal(metaErr.transient, undefined);
+    assert.match(metaErr.error ?? "", /MCP Events discovery failed.*Required request metadata is missing/);
+
+    // HTTP 400 with JSON-RPC -32020 HeaderMismatch is also a discovery error.
+    const mismatchErr = await discoverMcpEvents(
+      { url: "http://127.0.0.1:9/mcp" },
+      {
+        fetch: async () =>
+          new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32020, message: "Mcp-Protocol-Version header mismatch" } }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    );
+    assert.equal(mismatchErr.status, "error");
+    assert.equal(mismatchErr.supported, false);
+    assert.match(mismatchErr.error ?? "", /MCP Events discovery failed.*header mismatch/i);
+
+    // Unsupported protocol version (-32022), MethodNotFound (-32601), and legacy SDK 400 responses stay "unsupported".
+    for (const [status, body] of [
+      [400, { jsonrpc: "2.0", id: 1, error: { code: -32022, message: "Unsupported protocol version" } }],
+      [404, { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } }],
+      [400, { jsonrpc: "2.0", id: 1, error: { code: -32000, message: "Bad Request: Unsupported protocol version: 2026-07-28" } }],
+      [400, { jsonrpc: "2.0", id: 1, error: { code: -32000, message: "Bad Request: Server not initialized" } }],
+    ] as const) {
+      const res = await discoverMcpEvents(
+        { url: "http://127.0.0.1:9/mcp" },
+        { fetch: async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }) },
+      );
+      assert.equal(res.status, "unsupported", `expected unsupported for ${status} ${JSON.stringify(body)}`);
+      assert.equal(res.supported, false);
+    }
   } finally {
     await oldServer.close();
     await noCapServer.close();
     await authServer.close();
+    await missingMetaServer.close();
   }
 });
 
-test("encodeMcpRoutingHeader & validateEventArguments enforce routing and schema contracts", () => {
+test("encodeMcpRoutingHeader & validateEventArguments enforce SEP-2243 routing and schema contracts", () => {
   assert.equal(encodeMcpRoutingHeader("thread.run_settled"), "thread.run_settled");
-  assert.equal(encodeMcpRoutingHeader("hello world"), "b64:aGVsbG8gd29ybGQ=");
-  assert.equal(encodeMcpRoutingHeader("b64:literal"), "b64:YjY0OmxpdGVyYWw=");
+  assert.equal(encodeMcpRoutingHeader("b64:literal"), "b64:literal");
+  assert.equal(encodeMcpRoutingHeader("hello world"), "=?base64?aGVsbG8gd29ybGQ=?=");
+  assert.equal(encodeMcpRoutingHeader("café"), "=?base64?Y2Fmw6k=?=");
+  assert.equal(encodeMcpRoutingHeader("=?base64?literal?="), `=?base64?${Buffer.from("=?base64?literal?=", "utf8").toString("base64")}?=`);
+  assert.equal(encodeMcpRoutingHeader(""), "=?base64??=");
 
   const desc = {
     name: "thread.run_settled",
@@ -186,6 +253,11 @@ test("events/stream: sends routing & param headers, delivers matching events, ad
     assert.equal(firstReq.headers["mcp-name"], "incident.created");
     assert.equal(firstReq.headers["mcp-param-region"], "us-west1");
     assert.equal(firstReq.headers.origin, undefined);
+    assert.equal(firstReq.body.params._meta[MCP_PROTOCOL_VERSION_META_KEY], MCP_EVENTS_PROTOCOL_VERSION);
+    assert.deepEqual(firstReq.body.params._meta[MCP_CLIENT_CAPABILITIES_META_KEY], {
+      extensions: { [MCP_EVENTS_EXTENSION_ID]: {} },
+    });
+    assert.equal(firstReq.body.params._meta[MCP_CLIENT_INFO_META_KEY]?.name, "spencer");
 
     // Unrelated event does not match filter; matching event does.
     server.emit("incident.created", { region: "us-west1", threadId: "th-other" });
@@ -299,7 +371,7 @@ test("events/stream: handles HTTP 400 HeaderMismatch (-32020) by refreshing desc
     const handle = openMcpEventSubscription({
       config: { url: server.url },
       event: stale,
-      arguments: { tenant: "acme" },
+      arguments: { tenant: "acme corp" },
       onHeaderMismatch: async () => {
         refreshed++;
         return (await discoverMcpEvents({ url: server.url })).events[0];
@@ -310,7 +382,9 @@ test("events/stream: handles HTTP 400 HeaderMismatch (-32020) by refreshing desc
     });
     await waitFor(() => server.streamCount() === 1, "stream connected after header refresh");
     assert.equal(refreshed, 1);
-    server.emit("job.done", { tenant: "acme", ok: true });
+    const matchedReq = server.requestLog.filter((r) => r.method === "events/stream").at(-1)!;
+    assert.equal(matchedReq.headers["mcp-param-tenant"], "=?base64?YWNtZSBjb3Jw?=");
+    server.emit("job.done", { tenant: "acme corp", ok: true });
     await waitFor(() => received.length === 1, "event delivered after refresh");
     await handle.stop();
   } finally {
@@ -353,6 +427,12 @@ test("events/poll fallback: drains hasMore pages, reports gaps on truncation, an
     // Wait for initial cursor bootstrap poll (cursor: null returns [] + fresh cursor).
     await waitFor(() => persistedCursor !== null, "poll bootstrap cursor");
     assert.equal(received.length, 0);
+    const pollReq = server.requestLog.find((r) => r.method === "events/poll")!;
+    assert.equal(pollReq.body.params._meta[MCP_PROTOCOL_VERSION_META_KEY], MCP_EVENTS_PROTOCOL_VERSION);
+    assert.deepEqual(pollReq.body.params._meta[MCP_CLIENT_CAPABILITIES_META_KEY], {
+      extensions: { [MCP_EVENTS_EXTENSION_ID]: {} },
+    });
+    assert.equal(pollReq.body.params._meta[MCP_CLIENT_INFO_META_KEY]?.name, "spencer");
 
     // Emit two events; maxEvents=1 forces hasMore=true drain.
     server.emit("poll.only", { n: 1 });
@@ -424,6 +504,7 @@ test("parseJsonRpcResult handles Streamable HTTP text/event-stream responses on 
     { url: "http://127.0.0.1:9/mcp" },
     { fetch: async () => new Response("temporarily unavailable", { status: 503 }) },
   );
+  assert.equal(transient.status, "error");
   assert.equal(transient.supported, false);
   assert.equal(transient.transient, true);
 });
