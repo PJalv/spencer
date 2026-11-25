@@ -6,15 +6,19 @@
  * can deliver durable push (`events/stream`) or fallback poll (`events/poll`) events.
  */
 import type { McpServerConfig } from "../config.ts";
+import { spencerVersion } from "../version.ts";
 import { formatMcpError } from "./mcp.ts";
 
 export const MCP_EVENTS_PROTOCOL_VERSION = "2026-07-28";
 export const MCP_EVENTS_EXTENSION_ID = "io.modelcontextprotocol/events";
+export const MCP_PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion";
 export const MCP_SUBSCRIPTION_ID_META_KEY = "io.modelcontextprotocol/subscriptionId";
 export const MCP_CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities";
+export const MCP_CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo";
 export const MCP_SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo";
 
 export type McpEventDeliveryMode = "push" | "poll" | "webhook";
+export type McpEventsDiscoveryStatus = "supported" | "unsupported" | "revoked" | "error";
 type Obj = Record<string, any>;
 
 export interface McpEventDescriptor {
@@ -29,6 +33,7 @@ export interface McpEventDescriptor {
 }
 
 export interface McpEventsDiscovery {
+  status: McpEventsDiscoveryStatus;
   supported: boolean;
   revoked?: boolean;
   /** True when discovery failed due to a transient network/5xx/timeout error and should be retried later. */
@@ -104,26 +109,42 @@ export interface McpEventSubscriptionOptions {
   log?: (msg: string) => void;
 }
 
-const CLIENT_CAPABILITIES_META = {
-  [MCP_CLIENT_CAPABILITIES_META_KEY]: {
-    extensions: {
-      [MCP_EVENTS_EXTENSION_ID]: {},
-    },
-  },
-};
-
 const DEFAULT_DISCOVER_TIMEOUT_MS = 15_000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_POLL_MS = 15_000;
 const MAX_LIST_PAGES = 50;
+const BASE64_SENTINEL_PREFIX = "=?base64?";
+const BASE64_SENTINEL_SUFFIX = "?=";
 
 const isObject = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
 
-/** SEP-2243 routing header encoding: plain printable ASCII (0x21..0x7e) unless unsafe or prefixed `b64:`. */
+function buildRequestMeta(extra?: Obj): Obj {
+  return {
+    ...(extra ?? {}),
+    [MCP_PROTOCOL_VERSION_META_KEY]: MCP_EVENTS_PROTOCOL_VERSION,
+    [MCP_CLIENT_CAPABILITIES_META_KEY]: {
+      extensions: {
+        [MCP_EVENTS_EXTENSION_ID]: {},
+      },
+    },
+    [MCP_CLIENT_INFO_META_KEY]: {
+      name: "spencer",
+      version: spencerVersion(),
+    },
+  };
+}
+
+/**
+ * SEP-2243 routing header encoding: plain printable non-whitespace ASCII (0x21..0x7e) unless unsafe
+ * or wrapped in the `=?base64?...?=` sentinel.
+ */
 export function encodeMcpRoutingHeader(value: string): string {
-  return /^[\x21-\x7e]+$/.test(value) && !value.startsWith("b64:")
+  const isPlain =
+    /^[\x21-\x7e]+$/.test(value) &&
+    !(value.startsWith(BASE64_SENTINEL_PREFIX) && value.endsWith(BASE64_SENTINEL_SUFFIX));
+  return isPlain
     ? value
-    : `b64:${Buffer.from(value, "utf8").toString("base64")}`;
+    : `${BASE64_SENTINEL_PREFIX}${Buffer.from(value, "utf8").toString("base64")}${BASE64_SENTINEL_SUFFIX}`;
 }
 
 /** Lightweight JSON Schema validator for subscription arguments so invalid filters fail fast. */
@@ -354,11 +375,16 @@ async function mcpPost(
       }
     }
   }
+  const extraMeta = isObject(params._meta) ? params._meta : undefined;
+  const bodyParams: Obj = {
+    ...params,
+    _meta: buildRequestMeta(extraMeta),
+  };
   const fetchFn = opts.fetchImpl ?? fetch;
   const res = await fetchFn(config.url, {
     method: "POST",
     headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id: opts.id, method, params }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: opts.id, method, params: bodyParams }),
     signal: opts.signal,
   });
   if (!res.ok) throw await parseErrorResponse(res);
@@ -405,8 +431,32 @@ async function parseJsonRpcResult(res: Response, expectedId?: number): Promise<O
   return isObject(raw.result) ? raw.result : {};
 }
 
+const PROTOCOL_ERROR_CODES = new Set([-32700, -32600, -32602, -32603, -32020]);
+
 function isRevocationError(error: RpcError): boolean {
   return error.code === -32024 || error.httpStatus === 401 || error.httpStatus === 403;
+}
+
+function isUnsupportedDiscoveryError(error: RpcError): boolean {
+  if (error.code === -32022 || error.code === -32601 || error.code === -32026) return true;
+  if (PROTOCOL_ERROR_CODES.has(error.code)) return false;
+  if (error.httpStatus === 404 || error.httpStatus === 405) return true;
+  if (
+    error.httpStatus === 400 &&
+    /unsupported protocol version|server not initialized|mcp-session-id header is required/i.test(error.message)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isTransientDiscoveryError(error: unknown): boolean {
+  if (!(error instanceof RpcError)) return true;
+  if (isRevocationError(error) || isUnsupportedDiscoveryError(error)) return false;
+  if (error.httpStatus !== undefined) {
+    return error.httpStatus >= 500 || error.httpStatus === 408 || error.httpStatus === 429;
+  }
+  return error.code === -32603 || error.code === -32025;
 }
 
 function parseNotificationError(params: Obj): RpcError {
@@ -442,6 +492,7 @@ function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { sign
 export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverMcpEventsOptions = {}): Promise<McpEventsDiscovery> {
   if (!("url" in config)) {
     return {
+      status: "unsupported",
       supported: false,
       events: [],
       error: "MCP Events requires an HTTP MCP server (stdio servers are not supported for HTTP events).",
@@ -457,6 +508,7 @@ export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverM
     const serverIdentity = buildServerIdentity(discover, config);
     if (!version.supported) {
       return {
+        status: "unsupported",
         supported: false,
         events: [],
         ...(version.reported ? { protocolVersion: version.reported } : {}),
@@ -467,6 +519,7 @@ export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverM
     const cap = detectEventsCapability(discover.capabilities);
     if (!cap.supported) {
       return {
+        status: "unsupported",
         supported: false,
         events: [],
         protocolVersion: version.version,
@@ -481,7 +534,7 @@ export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverM
       const listRes = await mcpPost(
         config,
         "events/list",
-        { ...(cursor ? { cursor } : {}), _meta: CLIENT_CAPABILITIES_META },
+        cursor ? { cursor } : {},
         { id: listId, signal: timeout.signal, fetchImpl: opts.fetch },
       );
       const list = await parseJsonRpcResult(listRes, listId);
@@ -498,6 +551,7 @@ export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverM
       }
     }
     return {
+      status: "supported",
       supported: true,
       events,
       protocolVersion: version.version,
@@ -507,21 +561,21 @@ export async function discoverMcpEvents(config: McpServerConfig, opts: DiscoverM
     };
   } catch (e) {
     const revoked = e instanceof RpcError && isRevocationError(e);
-    const incompatible =
-      e instanceof RpcError &&
-      (e.code === -32601 || e.code === -32026 || e.httpStatus === 400 || e.httpStatus === 404 || e.httpStatus === 405);
-    const transient = !revoked && !incompatible;
+    const unsupported = !revoked && e instanceof RpcError && isUnsupportedDiscoveryError(e);
+    const transient = !revoked && !unsupported && isTransientDiscoveryError(e);
+    const status: McpEventsDiscoveryStatus = revoked ? "revoked" : unsupported ? "unsupported" : "error";
     const detail = formatMcpError(e, config);
     return {
+      status,
       supported: false,
       ...(revoked ? { revoked: true } : {}),
       ...(transient ? { transient: true } : {}),
       events: [],
       error: revoked
         ? `Authorization failed or revoked: ${detail}`
-        : incompatible
+        : unsupported
           ? `Server does not support MCP ${MCP_EVENTS_PROTOCOL_VERSION} Events (${detail}).`
-          : detail,
+          : `MCP Events discovery failed: ${detail}`,
     };
   } finally {
     timeout.cleanup();
@@ -621,7 +675,6 @@ export function openMcpEventSubscription(o: McpEventSubscriptionOptions): McpEve
           arguments: args,
           cursor: currentCursor,
           ...(o.maxAgeMs !== undefined ? { maxAgeMs: o.maxAgeMs } : {}),
-          _meta: CLIENT_CAPABILITIES_META,
         };
         if (usePush) {
           params.heartbeatMs = o.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
