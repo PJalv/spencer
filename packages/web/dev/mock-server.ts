@@ -29,10 +29,12 @@ interface Presence {
 }
 type MockMember = ChannelMember;
 type MockEvent = DaemonEvent;
+type MockCustomSetup = { baseUrl: string; apiKeyEnv?: string; authMode: "keyless" | "credentialed" | "unavailable"; ready: boolean };
 
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 7421);
 
 // Model page. MOCK_MODEL=none starts signed out with no model (the first-run state).
+let mockCustomSetup: MockCustomSetup | undefined;
 const COPILOT_MODELS = [
   { id: "claude-sonnet-5.5", name: "Claude Sonnet 5.5" },
   { id: "claude-opus-5.5", name: "Claude Opus 5.5" },
@@ -73,7 +75,7 @@ const MOCK_PROVIDERS = () => [
     hasSavedKey: mockSavedKeys.has("google"),
     models: [{ id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", reasoning: true }],
   },
-  { id: "openai-compatible", name: "OpenAI-compatible (Ollama / vLLM / local)", custom: true, hasSavedKey: mockSavedKeys.has("openai-compatible"), models: [] },
+  { id: "openai-compatible", name: "OpenAI-compatible (Ollama / vLLM / local)", custom: true, hasSavedKey: mockSavedKeys.has("openai-compatible"), ...(mockCustomSetup ? { customSetup: { ...mockCustomSetup, ready: mockCustomSetup.ready && (mockCustomSetup.authMode === "keyless" || mockSavedKeys.has("openai-compatible")) } } : {}), models: [] },
 ];
 const mockSavedKeys = new Set<string>();
 const model: ModelStatus =
@@ -1068,6 +1070,29 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       if (!MOCK_PROVIDERS().some((p) => p.id === provId) || !modelId) throw new HttpError(400, "unknown provider or model");
       model.conversation = { provider: provId, modelId, ready: true, ...(typeof body.thinking === "string" && body.thinking !== "off" ? { thinking: body.thinking as NonNullable<ModelStatus["thinking"]> } : {}) };
     }
+    emit({ type: "model", model });
+    return model;
+  }
+  if (a === "model" && b === "auth" && method === "PUT") {
+    const body = await readJson(req);
+    const allowed = new Set(["provider", "apiKey", "clearApiKey", "apiKeyEnv", "clearApiKeyEnv", "baseUrl"]);
+    if (Object.keys(body).some((key) => !allowed.has(key))) throw new HttpError(400, "provider auth requests cannot include model-choice fields");
+    const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+    const provider = MOCK_PROVIDERS().find((item) => item.id === providerId);
+    if (!provider) throw new HttpError(400, "unknown provider");
+    if (providerId === "github-copilot") throw new HttpError(409, "Use the GitHub Copilot sign-in controls.");
+    if (body.clearApiKey) mockSavedKeys.delete(providerId);
+    else if (typeof body.apiKey === "string" && body.apiKey.trim()) mockSavedKeys.add(providerId);
+    if (providerId === "openai-compatible") {
+      const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : mockCustomSetup?.baseUrl ?? "";
+      let safe = false;
+      try { const url = new URL(baseUrl); safe = (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && !baseUrl.includes("?") && !baseUrl.includes("#"); } catch {}
+      if (!safe) throw new HttpError(400, "custom endpoint must be a rememberable HTTP(S) URL");
+      const apiKeyEnv = body.clearApiKeyEnv === true ? undefined : typeof body.apiKeyEnv === "string" ? body.apiKeyEnv.trim() : mockCustomSetup?.apiKeyEnv;
+      const keyless = body.clearApiKeyEnv === true && !mockSavedKeys.has(providerId) && !apiKeyEnv;
+      mockCustomSetup = { baseUrl, ...(apiKeyEnv ? { apiKeyEnv } : {}), authMode: mockSavedKeys.has(providerId) || apiKeyEnv ? "credentialed" : keyless ? "keyless" : "unavailable", ready: mockSavedKeys.has(providerId) || keyless };
+    }
+    syncMockProviders();
     emit({ type: "model", model });
     return model;
   }

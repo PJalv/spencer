@@ -24,7 +24,7 @@ import {
   type ServerFrame,
   convoRef,
 } from "@spencer/protocol";
-import { loadConfig, resolveConfig, type McpServerConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
+import { loadConfig, resolveConfig, rememberableCustomProviderSetup, type CustomProviderSetup, type McpServerConfig, type ModelConfig, type SpencerConfig } from "./config.ts";
 import { spencerVersion } from "./version.ts";
 import type {
   AgentService,
@@ -563,7 +563,8 @@ export class Daemon {
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),
-      saveModel: (model) => this.saveModel(model),
+      saveModel: (model, customProvider) => this.saveModel(model, customProvider),
+      saveCustomProvider: (customProvider) => this.saveCustomProvider(customProvider),
       saveConversationModel: (model) => this.saveConversationModel(model),
       me: () => this.identity,
       bio: () => ({ text: readBio(this.dataDir), maxChars: MAX_ABOUT,
@@ -687,10 +688,20 @@ export class Daemon {
     };
   }
 
-  /** Writes `model` into config.json (keeping everything else in the file) and the running config. */
-  saveModel(model: ModelConfig): void {
-    this.writeConfigKey("model", model);
-    this.s.cfg = { ...this.need("cfg"), model };
+  /** Writes `model` and optional remembered custom endpoint setup without disturbing other config. */
+  saveModel(model: ModelConfig, customProvider?: CustomProviderSetup | null): void {
+    const current = this.need("cfg");
+    const remembered = customProvider === undefined ? current.customProvider : rememberableCustomProviderSetup(customProvider);
+    this.writeConfigKeys({ model, customProvider: remembered });
+    this.s.cfg = { ...current, model, ...(remembered ? { customProvider: remembered } : { customProvider: undefined }) };
+  }
+
+  /** Persists custom endpoint setup only; does not rewrite a possibly credential-bearing active model. */
+  saveCustomProvider(customProvider: CustomProviderSetup | null): void {
+    const remembered = rememberableCustomProviderSetup(customProvider);
+    this.writeConfigKey("customProvider", remembered);
+    const current = this.need("cfg");
+    this.s.cfg = { ...current, ...(remembered ? { customProvider: remembered } : { customProvider: undefined }) };
   }
 
   saveConversationModel(model: ModelConfig | undefined): void {
@@ -726,10 +737,16 @@ export class Daemon {
 
   /** Set (or with `undefined`, remove) one top-level key of config.json, atomically. */
   private writeConfigKey(key: string, value: unknown): void {
+    this.writeConfigKeys({ [key]: value });
+  }
+
+  private writeConfigKeys(patch: Record<string, unknown>): void {
     const file = join(this.dataDir, "config.json");
     const raw = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
-    if (value === undefined) delete raw[key];
-    else raw[key] = value;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete raw[key];
+      else raw[key] = value;
+    }
     const tmp = `${file}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", { mode: 0o600 });
     renameSync(tmp, file);

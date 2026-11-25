@@ -117,6 +117,7 @@ export const api = {
   cancelFollowup: (id) => request("POST", `/api/followups/${enc(id)}/cancel`),
   decideRequest: (id, approve) => request("POST", `/api/requests/${enc(id)}/${approve ? "approve" : "deny"}`),
   model: () => request("GET", "/api/model"),
+  saveProviderAuth: (provider, opts = {}) => request("PUT", "/api/model/auth", { provider, ...opts }),
   setModel: (provider, modelId, opts = {}) => request("PUT", "/api/model", { provider, modelId, ...opts }),
   setConversationModel: (provider, modelId, opts = {}) => request("PUT", "/api/model/conversation", provider === null ? { provider } : { provider, modelId, ...opts }),
   conversation: (ch) => request("GET", `/api/channels/${enc(ch)}/conversation`),

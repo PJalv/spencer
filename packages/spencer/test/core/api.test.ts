@@ -70,6 +70,22 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.equal(st.policy.maxHops, 40);
     assert.equal(st.policy.maxAgentTurns, 20);
 
+    // --- provider auth is separate from active model switching
+    const authCalls: { provider: string; options: unknown }[] = [];
+    const activeModel = { provider: "anthropic", modelId: "synthetic-active-model" };
+    const apiAgent = A.agent() as unknown as import("../../src/contracts.ts").AgentService;
+    apiAgent.setProviderAuth = async (provider, options) => {
+      authCalls.push({ provider, options });
+      return { ...activeModel, ready: true, copilot: { connected: false, models: [], deviceLogin: false, cliAccounts: [] } };
+    };
+    const savedAuth = await http(port, "PUT", "/api/model/auth", { headers: H, body: { provider: "openai", apiKey: "synthetic-api-key" } });
+    assert.equal(savedAuth.status, 200, savedAuth.text);
+    assert.deepEqual(authCalls, [{ provider: "openai", options: { apiKey: "synthetic-api-key" } }]);
+    assert.deepEqual({ provider: savedAuth.json().provider, modelId: savedAuth.json().modelId }, activeModel);
+    assert.equal((await http(port, "PUT", "/api/model/auth", { headers: H, body: { provider: "openai", modelId: "must-not-switch" } })).status, 400);
+    assert.equal((await http(port, "PUT", "/api/model/auth", { headers: H, body: { provider: "openai", thinking: "high" } })).status, 400);
+    assert.equal(authCalls.length, 1, "rejected model-choice fields never reach provider auth");
+
     // --- events ws: origin / token / host checks
     const base = `ws://127.0.0.1:${port}/api/events`;
     assert.equal((await wsOpen(`${base}?token=bad`)).status, 401);

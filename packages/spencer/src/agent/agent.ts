@@ -1544,6 +1544,9 @@ export class SpencerAgent implements AgentService {
   async refreshModelStatus(): Promise<ModelStatus> {
     return this.mm().status();
   }
+  setProviderAuth(provider: string, opts?: import("../contracts.ts").ProviderAuthOptions): Promise<ModelStatus> {
+    return this.mm().setProviderAuth(provider, opts);
+  }
   setModel(provider: string, modelId: string, opts?: import("../contracts.ts").SetModelOptions): Promise<ModelStatus> {
     return this.mm().setModel(provider, modelId, opts);
   }

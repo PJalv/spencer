@@ -202,6 +202,40 @@ function modelOptions(body: Record<string, unknown>): import("../contracts.ts").
     if (typeof body.apiKeyEnv !== "string") throw new HttpError(400, "apiKeyEnv must be a string");
     opts.apiKeyEnv = body.apiKeyEnv;
   }
+  if (body.clearApiKeyEnv !== undefined) {
+    if (typeof body.clearApiKeyEnv !== "boolean") throw new HttpError(400, "clearApiKeyEnv must be a boolean");
+    opts.clearApiKeyEnv = body.clearApiKeyEnv;
+  }
+  if (body.baseUrl !== undefined) {
+    if (typeof body.baseUrl !== "string") throw new HttpError(400, "baseUrl must be a string");
+    opts.baseUrl = body.baseUrl;
+  }
+  return opts;
+}
+
+/** Provider auth/setup fields only: reject model-choice values instead of silently ignoring them. */
+function providerAuthOptions(body: Record<string, unknown>): import("../contracts.ts").ProviderAuthOptions {
+  const allowed = new Set(["provider", "apiKey", "clearApiKey", "apiKeyEnv", "clearApiKeyEnv", "baseUrl"]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    throw new HttpError(400, "provider auth requests cannot include model-choice fields");
+  }
+  const opts: import("../contracts.ts").ProviderAuthOptions = {};
+  if (body.apiKey !== undefined) {
+    if (typeof body.apiKey !== "string") throw new HttpError(400, "apiKey must be a string");
+    opts.apiKey = body.apiKey;
+  }
+  if (body.clearApiKey !== undefined) {
+    if (typeof body.clearApiKey !== "boolean") throw new HttpError(400, "clearApiKey must be a boolean");
+    opts.clearApiKey = body.clearApiKey;
+  }
+  if (body.apiKeyEnv !== undefined) {
+    if (typeof body.apiKeyEnv !== "string") throw new HttpError(400, "apiKeyEnv must be a string");
+    opts.apiKeyEnv = body.apiKeyEnv;
+  }
+  if (body.clearApiKeyEnv !== undefined) {
+    if (typeof body.clearApiKeyEnv !== "boolean") throw new HttpError(400, "clearApiKeyEnv must be a boolean");
+    opts.clearApiKeyEnv = body.clearApiKeyEnv;
+  }
   if (body.baseUrl !== undefined) {
     if (typeof body.baseUrl !== "string") throw new HttpError(400, "baseUrl must be a string");
     opts.baseUrl = body.baseUrl;
@@ -672,6 +706,13 @@ export class ApiServer {
         if (typeof body.provider !== "string" || typeof body.modelId !== "string") throw new HttpError(400, "provider and modelId are required");
         return await agent.setModel(body.provider, body.modelId, modelOptions(body));
       }
+    }
+    if (p === "/api/model/auth" && method === "PUT") {
+      const agent = b.agent();
+      if (!agent.setProviderAuth) throw new HttpError(404, "provider authentication settings are not supported");
+      const body = await readJson(req);
+      if (typeof body.provider !== "string") throw new HttpError(400, "provider is required");
+      return await agent.setProviderAuth(body.provider, providerAuthOptions(body));
     }
     if (p === "/api/model/conversation" && method === "PUT") {
       experimental();

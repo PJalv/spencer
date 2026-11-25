@@ -8,8 +8,8 @@
  *  - reports all of it as `ModelStatus` (GET /api/model and `model` events).
  */
 import type { Models } from "@earendil-works/pi-ai";
-import type { ModelConfig, ThinkingLevel } from "../config.ts";
-import type { CoreServices, LoginState, ModelProviderOption, ModelStatus, SetModelOptions } from "../contracts.ts";
+import { rememberableCustomProviderSetup, type CustomProviderSetup, type ModelConfig, type ThinkingLevel } from "../config.ts";
+import type { CoreServices, LoginState, ModelProviderOption, ModelStatus, ProviderAuthOptions, SetModelOptions } from "../contracts.ts";
 import {
   COPILOT_PROVIDER,
   CopilotAuthError,
@@ -61,7 +61,7 @@ function normalizeHttpUrl(raw: string): string {
     throw new ModelError(400, "baseUrl must be a valid http(s) URL");
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new ModelError(400, "baseUrl must use http:// or https://");
-  return u.toString().replace(/\/+$/, "");
+  return raw.trim();
 }
 
 export interface ModelManagerOptions {
@@ -193,10 +193,54 @@ export class ModelManager {
     this.combined = withExtraModel(this.setup.models, ref ? { models: this.convSetup!.models, ref } : undefined);
   }
 
-  private async reload(): Promise<void> {
+  private async reload(opts: { rememberCustomSetup?: boolean; preserveCredentialed?: boolean; clearApiKeyEnv?: boolean } = {}): Promise<void> {
     await this.build();
     await this.opts.onReload();
+    if (opts.rememberCustomSetup) {
+      const model = this.opts.core.config().model;
+      const setup = this.customSetupFromModel(model, !!this.setup?.ref, true, opts.preserveCredentialed, opts.clearApiKeyEnv);
+      this.opts.core.saveCustomProvider?.(setup ?? null);
+    }
     this.emit();
+  }
+
+  private customSetupFromModel(model: ModelConfig, ready: boolean, explicitlyConfigured = false, preserveCredentialed = false, clearApiKeyEnv = false): CustomProviderSetup | undefined {
+    if (model.provider !== "openai-compatible") return undefined;
+    const custom = model as Extract<ModelConfig, { provider: "openai-compatible" }>;
+    const previous = this.opts.core.config().customProvider;
+    const currentSetup = rememberableCustomProviderSetup({ baseUrl: custom.baseUrl, modelId: custom.modelId, authMode: "unavailable", ready: false });
+    const sameEndpoint = previous?.baseUrl === currentSetup?.baseUrl;
+    const hasLiteralKey = typeof custom.apiKey === "string" && custom.apiKey.length > 0;
+    const apiKeyEnv = clearApiKeyEnv ? undefined : custom.apiKeyEnv ?? (sameEndpoint && previous?.authMode === "credentialed" ? previous.apiKeyEnv : undefined);
+    const authMode = hasLiteralKey
+      ? "unavailable"
+      : preserveCredentialed || apiKeyEnv || this.savedKeys.has("openai-compatible")
+        ? "credentialed"
+        : explicitlyConfigured
+          ? "keyless"
+          : sameEndpoint && previous?.authMode === "credentialed"
+            ? "credentialed"
+            : sameEndpoint && previous?.authMode === "keyless"
+              ? "keyless"
+              : !previous && !apiKeyEnv ? "keyless" : "unavailable";
+    const missingEnvironmentKey = authMode === "credentialed" && !!apiKeyEnv && !!this.setup?.error?.includes(`environment variable ${apiKeyEnv}`);
+    return rememberableCustomProviderSetup({
+      baseUrl: custom.baseUrl,
+      modelId: custom.modelId,
+      ...(apiKeyEnv ? { apiKeyEnv } : {}),
+      authMode,
+      ready: ready || missingEnvironmentKey,
+    });
+  }
+
+  private hasCustomCredentials(setup: CustomProviderSetup): boolean {
+    if (setup.authMode === "keyless") return true;
+    if (setup.authMode !== "credentialed") return false;
+    return this.savedKeys.has("openai-compatible") || Boolean(setup.apiKeyEnv && process.env[setup.apiKeyEnv]);
+  }
+
+  private customSetupForSave(current: ModelConfig): CustomProviderSetup | undefined {
+    return this.opts.core.config().customProvider ?? (current.provider === "openai-compatible" ? this.customSetupFromModel(current, !!this.setup?.ref) : undefined);
   }
 
   private emit(): void {
@@ -233,12 +277,17 @@ export class ModelManager {
         return { id: p.id, name: p.name, models: this.copilot ? this.copilotModels() : [] };
       }
       if (p.custom) {
-        const envName = cur.provider === p.id ? cur.apiKeyEnv : undefined;
+        const customSetup = this.opts.core.config().customProvider ?? (cur.provider === p.id
+          ? this.customSetupFromModel(this.opts.core.config().model, !!this.setup?.ref)
+          : undefined);
+        const status = customSetup ? { ...customSetup, ready: customSetup.ready && this.hasCustomCredentials(customSetup) } : undefined;
+        const envName = status?.apiKeyEnv ?? (cur.provider === p.id ? cur.apiKeyEnv : undefined);
         return {
           id: p.id,
           name: p.name,
           custom: true,
-          ...(envName ? { hasEnvKey: Boolean(process.env[envName]) } : {}),
+          ...(status ? { customSetup: status } : {}),
+          hasEnvKey: envName ? Boolean(process.env[envName]) : false,
           hasSavedKey: this.savedKeys.has(p.id),
           models: [],
         };
@@ -319,10 +368,102 @@ export class ModelManager {
     };
   }
 
+  async setProviderAuth(provider: string, opts: ProviderAuthOptions = {}): Promise<ModelStatus> {
+    if (typeof provider !== "string" || !provider.trim()) throw new ModelError(400, "provider is required");
+    const prov = provider.trim();
+    if (prov === COPILOT_PROVIDER) throw new ModelError(409, "Use the GitHub Copilot sign-in controls to manage this provider.");
+    const isCustom = prov === "openai-compatible";
+    if (!isCustom && !Object.hasOwn(BUILTIN_PROVIDERS, prov)) throw new ModelError(400, `unknown model provider "${prov}"`);
+    if (!isCustom && (opts.baseUrl !== undefined || opts.apiKeyEnv !== undefined || opts.clearApiKeyEnv !== undefined)) {
+      throw new ModelError(400, "endpoint settings are only supported for openai-compatible");
+    }
+    if (opts.apiKey !== undefined && typeof opts.apiKey !== "string") throw new ModelError(400, "apiKey must be a string");
+    if (opts.clearApiKey !== undefined && typeof opts.clearApiKey !== "boolean") throw new ModelError(400, "clearApiKey must be a boolean");
+    if (opts.clearApiKey && opts.apiKey?.trim()) throw new ModelError(400, "apiKey and clearApiKey cannot be used together");
+    if (opts.clearApiKeyEnv !== undefined && typeof opts.clearApiKeyEnv !== "boolean") throw new ModelError(400, "clearApiKeyEnv must be a boolean");
+    if (opts.baseUrl !== undefined && typeof opts.baseUrl !== "string") throw new ModelError(400, "baseUrl must be a string");
+
+    let apiKeyEnv: string | undefined;
+    if (opts.apiKeyEnv !== undefined && opts.apiKeyEnv.trim() !== "") {
+      apiKeyEnv = opts.apiKeyEnv.trim();
+      if (!ENV_NAME_RE.test(apiKeyEnv)) throw new ModelError(400, "apiKeyEnv must be an environment variable name");
+    }
+    const baseUrl = opts.baseUrl?.trim() ? normalizeHttpUrl(opts.baseUrl) : undefined;
+    const config = this.opts.core.config();
+    const current = config.model as ModelConfig & { provider: string; baseUrl?: string };
+    const conversation = config.conversationModel;
+    let existingCustom: CustomProviderSetup | undefined;
+    let savedBaseUrl: string | undefined;
+
+    if (isCustom) {
+      if (!this.opts.core.saveCustomProvider) throw new ModelError(501, "this Spencer cannot save custom provider setup");
+      existingCustom = this.opts.core.config().customProvider ?? (current.provider === prov ? this.customSetupFromModel(current, !!this.setup?.ref) : undefined);
+      savedBaseUrl = baseUrl ?? existingCustom?.baseUrl ?? (current.provider === prov ? current.baseUrl : undefined);
+      if (!savedBaseUrl) throw new ModelError(400, 'baseUrl is required for "openai-compatible" setup');
+      if (!rememberableCustomProviderSetup({ baseUrl: savedBaseUrl, authMode: "unavailable", ready: false })) {
+        throw new ModelError(400, "custom endpoint URL cannot be remembered; remove userinfo, query strings, or fragments");
+      }
+    } else if (opts.clearApiKeyEnv !== undefined || opts.apiKeyEnv !== undefined) {
+      throw new ModelError(400, "apiKeyEnv options are only supported for openai-compatible");
+    }
+
+    const key = opts.apiKey?.trim();
+    let credentialChanged = false;
+    if (opts.clearApiKey) {
+      if (this.savedKeys.has(prov)) {
+        await this.credentials.delete(prov);
+        this.savedKeys.delete(prov);
+        credentialChanged = true;
+      }
+    } else if (key) {
+      await this.credentials.modify(prov, async () => ({ type: "api_key", key }));
+      this.savedKeys.add(prov);
+      credentialChanged = true;
+    }
+
+    if (isCustom) {
+      const sameEndpoint = existingCustom?.baseUrl === savedBaseUrl;
+      const envName = opts.clearApiKeyEnv === true ? undefined : apiKeyEnv ?? (sameEndpoint ? existingCustom?.apiKeyEnv : undefined);
+      const hasSavedKey = this.savedKeys.has(prov);
+      const hasEnvKey = !!envName && !!process.env[envName];
+      const explicitlyKeyless = opts.clearApiKeyEnv === true && !hasSavedKey && !envName;
+      const preserveKeyless = opts.clearApiKeyEnv !== true && sameEndpoint && existingCustom?.authMode === "keyless" && !hasSavedKey && !envName;
+      const authMode = explicitlyKeyless || preserveKeyless
+        ? "keyless"
+        : hasSavedKey || envName ? "credentialed" : "unavailable";
+      const setup = rememberableCustomProviderSetup({
+        baseUrl: savedBaseUrl,
+        ...(sameEndpoint && existingCustom?.modelId ? { modelId: existingCustom.modelId } : {}),
+        ...(authMode === "credentialed" && envName ? { apiKeyEnv: envName } : {}),
+        authMode,
+        ready: authMode === "keyless" || (authMode === "credentialed" && (hasSavedKey || hasEnvKey)),
+      });
+      if (!setup) throw new ModelError(400, "invalid custom provider setup");
+      this.opts.core.saveCustomProvider!(setup);
+    }
+
+    if (credentialChanged && (current.provider === prov || conversation?.provider === prov)) {
+      await this.build();
+      await this.opts.onReload();
+    }
+    this.emit();
+    return this.status();
+  }
+
   async setModel(provider: string, modelId: string, opts: SetModelOptions = {}): Promise<ModelStatus> {
-    const next = await this.modelConfig(provider, modelId, opts, this.opts.core.config().model);
-    this.save(next);
-    await this.reload();
+    const current = this.opts.core.config().model;
+    const hadSavedCustomKey = this.savedKeys.has("openai-compatible");
+    const next = await this.modelConfig(provider, modelId, opts, current);
+    const clearedCustomKey = provider === "openai-compatible" && opts.clearApiKey === true && hadSavedCustomKey;
+    const customProvider = provider === "openai-compatible"
+      ? this.customSetupFromModel(next, false, true, clearedCustomKey, opts.clearApiKeyEnv === true)
+      : this.customSetupForSave(current);
+    this.save(next, customProvider ?? null);
+    await this.reload(provider === "openai-compatible" ? {
+      rememberCustomSetup: true,
+      preserveCredentialed: clearedCustomKey,
+      clearApiKeyEnv: opts.clearApiKeyEnv === true,
+    } : undefined);
     return this.status();
   }
 
@@ -347,6 +488,8 @@ export class ModelManager {
     }
     const prov = provider.trim();
     const mid = modelId.trim();
+    if (opts.clearApiKeyEnv !== undefined && typeof opts.clearApiKeyEnv !== "boolean") throw new ModelError(400, "clearApiKeyEnv must be a boolean");
+    if (opts.clearApiKeyEnv === true && prov !== "openai-compatible") throw new ModelError(400, "clearApiKeyEnv is only supported for openai-compatible");
     if (opts.thinking !== undefined && !THINKING_LEVELS.has(opts.thinking)) {
       throw new ModelError(400, `thinking must be one of ${[...THINKING_LEVELS].join(", ")}`);
     }
@@ -383,7 +526,13 @@ export class ModelManager {
       const url = baseUrl ?? (current.provider === "openai-compatible" ? current.baseUrl : undefined);
       if (!url) throw new ModelError(400, 'baseUrl is required for "openai-compatible"');
       await updateKey(prov);
-      const env = apiKeyEnv ?? (current.provider === "openai-compatible" ? current.apiKeyEnv : undefined);
+      const remembered = this.opts.core.config().customProvider;
+      const rememberedKeyless = remembered?.baseUrl === url && remembered.authMode === "keyless";
+      const env = opts.clearApiKeyEnv === true
+        ? undefined
+        : apiKeyEnv ?? (rememberedKeyless ? undefined :
+          (current.provider === "openai-compatible" && current.baseUrl === url ? current.apiKeyEnv : undefined) ??
+          (remembered?.baseUrl === url ? remembered.apiKeyEnv : undefined));
       const thinking = opts.thinking ?? (current.provider === "openai-compatible" ? current.thinking : undefined);
       next = {
         provider: "openai-compatible",
@@ -414,9 +563,9 @@ export class ModelManager {
     return next;
   }
 
-  private save(model: ModelConfig): void {
+  private save(model: ModelConfig, customProvider: CustomProviderSetup | null = this.opts.core.config().customProvider ?? null): void {
     if (!this.opts.core.saveModel) throw new ModelError(501, "this Spencer cannot change its model at runtime");
-    this.opts.core.saveModel(model);
+    this.opts.core.saveModel(model, customProvider);
   }
 
   /** A Copilot sign-in succeeded: save it, and if Spencer has no working model yet, start using Copilot. */
@@ -429,7 +578,7 @@ export class ModelManager {
       `GitHub Copilot connected as @${cred.login}${cred.plan ? ` (${cred.plan})` : ""} (${cred.availableModels?.length ?? 0} live models from ${cred.apiBase})`,
     );
     const current = this.opts.core.config().model as { provider: string; modelId?: string };
-    const available = this.copilotModels().map((m) => m.id);
+    const available = this.copilotModels().map((model) => model.id);
     const keep = current.provider === COPILOT_PROVIDER && current.modelId && available.includes(current.modelId);
     if (!keep && (current.provider === COPILOT_PROVIDER || !this.setup?.ref)) {
       const pick = pickCopilotModel(available);
@@ -455,12 +604,12 @@ export class ModelManager {
       await this.credentials.modify(COPILOT_PROVIDER, async () => next);
       this.copilot = next;
       this.opts.log(`GitHub Copilot models refreshed: ${next.availableModels?.length ?? 0} models from ${next.apiBase}`);
-      const cur = this.opts.core.config().model as { provider: string; modelId?: string; thinking?: string };
-      const available = this.copilotModels().map((m) => m.id);
-      const keep = cur.provider === COPILOT_PROVIDER && cur.modelId && available.includes(cur.modelId);
-      if (!keep && (cur.provider === COPILOT_PROVIDER || !this.setup?.ref)) {
+      const current = this.opts.core.config().model as { provider: string; modelId?: string; thinking?: string };
+      const available = this.copilotModels().map((model) => model.id);
+      const keep = current.provider === COPILOT_PROVIDER && current.modelId && available.includes(current.modelId);
+      if (!keep && (current.provider === COPILOT_PROVIDER || !this.setup?.ref)) {
         const pick = pickCopilotModel(available);
-        if (pick) this.save(copilotModelConfig(pick, cur.provider === COPILOT_PROVIDER ? cur.thinking : undefined));
+        if (pick) this.save(copilotModelConfig(pick, current.provider === COPILOT_PROVIDER ? current.thinking : undefined));
       }
       await this.reload();
       return this.status();

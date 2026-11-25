@@ -3,6 +3,7 @@ import { h, icon, copyText } from "./dom.js";
 import { api, attempt, toast } from "./api.js";
 import { S, on, setModel, setExperimental } from "./state.js";
 import { viewHeader } from "./common.js";
+import { renderModelSelection } from "./model-selection.js";
 
 const PLAN = { individual: "Copilot Pro", individual_pro: "Copilot Pro+", business: "Copilot Business", enterprise: "Copilot Enterprise", free: "Copilot Free" };
 const planName = (p) => PLAN[p] ?? (p ? `Copilot ${p}` : "Copilot");
@@ -43,7 +44,9 @@ function mmss(ms) {
 export function modelView(main) {
   const now = h("section.model-now", { "aria-live": "polite" });
   const picker = h("section.model-card", { "aria-labelledby": "picker-title" });
-  const copilot = h("section.model-card", { "aria-labelledby": "copilot-title" });
+  const auth = h("section.model-card", { "aria-labelledby": "auth-title" });
+  const copilotTitle = h("h2.section-title", { id: "copilot-title", hidden: true }, "GitHub Copilot authentication");
+  const copilot = h("section.model-card", { "aria-labelledby": "copilot-title", hidden: true });
   const about = h("section.model-card", { "aria-labelledby": "about-title" });
   const convo = h("section.model-card", { "aria-labelledby": "convo-title" });
   const convoTitle = h("h2.section-title", { id: "convo-title" }, "Conversations model");
@@ -86,12 +89,14 @@ export function modelView(main) {
         "div.page-body",
         null,
         now,
-        h("h2.section-title", { id: "picker-title" }, "Model picker"),
+        h("h2.section-title", { id: "picker-title" }, "Model selection"),
         picker,
+        h("h2.section-title", { id: "auth-title" }, "Provider authentication & setup"),
+        auth,
+        copilotTitle,
+        copilot,
         convoTitle,
         convo,
-        h("h2.section-title", { id: "copilot-title" }, "GitHub Copilot"),
-        copilot,
         h("h2.section-title", { id: "exp-title" }, "Experimental"),
         experimental,
         h("h2.section-title", { id: "about-title" }, "About Spencer"),
@@ -103,50 +108,54 @@ export function modelView(main) {
 
   let busy = false;
   let tick = null;
-  // Draft picker state so background model events don't wipe what the user is typing.
-  const draft = { provider: "", modelId: "", filter: "", thinking: "off", baseUrl: "", apiKey: "", initialized: false, lastKey: "", wasConnected: false };
-
-  const syncDraftFromModel = (m, force = false) => {
-    if (!m) return;
-    const connected = !!m.copilot?.connected;
-    const copilotSig = (m.copilot?.models ?? []).map((x) => `${x.id}:${x.name}`).join(",");
-    const key = `${m.provider ?? ""}|${m.modelId ?? ""}|${m.thinking ?? ""}|${m.baseUrl ?? ""}|${m.ready ? "1" : "0"}|${connected ? "1" : "0"}|${m.copilot?.modelsRefreshedAt ?? ""}|${m.copilot?.modelsError ?? ""}|${copilotSig}`;
-    if (!force && draft.initialized && draft.lastKey === key) return;
-    const justConnected = !draft.wasConnected && connected;
-    const providers = m.providers ?? [];
-    const fallbackProv = connected ? "github-copilot" : (providers[0]?.id ?? "anthropic");
-    if (justConnected && (draft.provider === "github-copilot" || m.provider === "github-copilot")) {
-      draft.provider = "github-copilot";
-    } else if (draft.initialized && !force && draft.provider === "github-copilot" && connected) {
-      draft.provider = "github-copilot";
-    } else {
-      draft.provider = providers.some((p) => p.id === m.provider) ? m.provider : fallbackProv;
+  const selection = { provider: "", modelId: "", filter: "", thinking: "off", baseUrl: "", baseUrlDirty: false, setupBaseUrl: undefined };
+  const authDraft = { provider: "", apiKey: "", baseUrl: "", apiKeyEnv: "", keyless: false, touched: false };
+  const authProviderDrafts = new Map();
+  let wasCopilotConnected = false;
+  const syncCopilotSelection = (m) => {
+    const connected = !!m?.copilot?.connected;
+    if (!wasCopilotConnected && connected && !selection.provider && (authDraft.provider === "github-copilot" || m.provider === "github-copilot")) {
+      selection.provider = "github-copilot";
+      selection.modelId = "";
     }
-    const prov = providers.find((p) => p.id === draft.provider);
-    if (draft.provider === m.provider && m.modelId && (!prov?.models?.length || prov.models.some((x) => x.id === m.modelId))) {
-      draft.modelId = m.modelId;
-    } else {
-      draft.modelId = prov?.models?.[0]?.id ?? "";
-    }
-    const needsThinking = draft.provider === "github-copilot" && /^claude-/i.test(draft.modelId);
-    draft.thinking = m.thinking ?? (needsThinking ? "medium" : "off");
-    draft.baseUrl = m.baseUrl ?? "";
-    draft.apiKey = "";
-    draft.filter = "";
-    draft.initialized = true;
-    draft.wasConnected = connected;
-    draft.lastKey = key;
+    wasCopilotConnected = connected;
   };
 
-  const act = async (fn, successMsg) => {
+  const syncCustomSelection = (m) => {
+    const provider = m.providers?.find((item) => item.id === selection.provider && item.custom);
+    if (!provider) return;
+    const nextSetupUrl = typeof provider.customSetup?.baseUrl === "string"
+      ? provider.customSetup.baseUrl
+      : m.provider === provider.id && typeof m.baseUrl === "string" ? m.baseUrl : undefined;
+    if (nextSetupUrl === selection.setupBaseUrl) return;
+
+    const stillBoundToSetup = !selection.baseUrlDirty || selection.baseUrl === selection.setupBaseUrl;
+    if (stillBoundToSetup) {
+      selection.baseUrl = nextSetupUrl ?? "";
+      selection.baseUrlDirty = false;
+    }
+    selection.modelId = "";
+    selection.filter = "";
+    selection.thinking = "off";
+    selection.setupBaseUrl = nextSetupUrl;
+  };
+
+  const act = async (fn, successMsg, { preserveDrafts = false, clearAuthDraft = false } = {}) => {
     if (busy) return;
     busy = true;
     render();
     const r = await attempt(fn);
     busy = false;
     if (r && typeof r === "object" && "copilot" in r) {
-      syncDraftFromModel(r, true);
-      syncConvoDraft(r, true);
+      if (clearAuthDraft) {
+        authDraft.apiKey = "";
+        authDraft.touched = false;
+        authProviderDrafts.delete(authDraft.provider);
+      }
+      if (!preserveDrafts) {
+        syncCopilotSelection(r);
+        syncConvoDraft(r, true);
+      }
       setModel(r);
       if (successMsg) toast(typeof successMsg === "function" ? successMsg(r) : successMsg, "info");
     } else render();
@@ -181,227 +190,116 @@ export function modelView(main) {
     );
   };
 
-  const renderPicker = (m) => {
+  const renderPicker = (m) => renderModelSelection(picker, m, selection, {
+    busy,
+    rerender: () => renderPicker(S.model),
+    onSwitch: (provider, modelId, options) => void act(() => api.setModel(provider, modelId, options), `Switched model to ${modelId}`),
+  });
+
+  const renderAuth = (m) => {
     const providers = m.providers ?? [];
-    if (!providers.length) {
-      picker.replaceChildren(h("p.muted", null, "No model providers available."));
+    if (!authDraft.provider) authDraft.provider = providers.some((provider) => provider.id === m.provider) ? m.provider : providers[0]?.id ?? "";
+    const provider = providers.find((item) => item.id === authDraft.provider);
+    const isCopilot = provider?.id === "github-copilot";
+    copilotTitle.hidden = copilot.hidden = !isCopilot;
+    if (isCopilot) copilot.replaceChildren(m.copilot?.connected ? connectedBox(m) : signInBox(m.copilot));
+    if (!provider) {
+      auth.replaceChildren(h("p.muted", null, "No providers available."));
       return;
     }
-    if (!providers.some((p) => p.id === draft.provider)) draft.provider = providers[0].id;
-    const prov = providers.find((p) => p.id === draft.provider) ?? providers[0];
-    const isCopilot = prov.id === "github-copilot";
-    const isCustom = !!prov.custom;
-
-    const providerSelect = h(
-      "select.input.model-select",
-      {
-        "aria-label": "Provider",
-        disabled: busy,
-        on: {
-          change: (e) => {
-            draft.provider = e.target.value;
-            draft.filter = "";
-            draft.apiKey = "";
-            const nextProv = providers.find((p) => p.id === draft.provider);
-            if (draft.provider === m.provider && m.modelId) draft.modelId = m.modelId;
-            else draft.modelId = nextProv?.models?.[0]?.id ?? "";
-            if (draft.provider === "github-copilot" && /^claude-/i.test(draft.modelId) && draft.thinking === "off") draft.thinking = "medium";
-            if (draft.provider === "openai-compatible" && !draft.baseUrl) draft.baseUrl = m.baseUrl ?? "http://localhost:11434/v1";
-            renderPicker(m);
-          },
-        },
-      },
-      providers.map((p) => {
-        const tag =
-          p.id === "github-copilot"
-            ? m.copilot?.connected
-              ? " (connected)"
-              : ""
-            : p.hasEnvKey || p.hasSavedKey
-              ? " (key ready)"
-              : "";
-        return h("option", { value: p.id, selected: p.id === prov.id }, `${p.name}${tag}`);
-      }),
-    );
-
-    const copilotClaude = isCopilot && /^claude-/i.test(draft.modelId);
-    const thinkingSelect = h(
-      "select.input.model-select",
-      {
-        "aria-label": "Thinking effort",
-        disabled: busy,
-        on: { change: (e) => (draft.thinking = e.target.value) },
-      },
-      THINKING_OPTIONS.filter(([v]) => !copilotClaude || v !== "off").map(([v, label]) =>
-        h("option", { value: v, selected: draft.thinking === v || (copilotClaude && draft.thinking === "off" && v === "medium") }, label),
-      ),
-    );
-
-    let modelField;
-    let extraFields = [];
-    let canSave = true;
-
-    if (isCustom) {
-      const urlInput = h("input.input.mono", {
-        type: "url",
-        placeholder: "http://localhost:11434/v1",
-        value: draft.baseUrl,
-        disabled: busy,
-        on: { input: (e) => (draft.baseUrl = e.target.value) },
-      });
-      const idInput = h("input.input.mono", {
-        type: "text",
-        placeholder: "e.g. llama3.1",
-        value: draft.modelId,
-        disabled: busy,
-        on: { input: (e) => (draft.modelId = e.target.value) },
-      });
-      modelField = h("label.model-pick-label", null, "Model ID", idInput);
-      extraFields.push(h("label.model-pick-label", null, "Base URL", urlInput));
-    } else if (isCopilot && !m.copilot?.connected) {
-      canSave = false;
-      modelField = h("p.signin-note", null, "Sign in to GitHub Copilot below to see and pick your Copilot models.");
-    } else {
-      const allModels = prov.models ?? [];
-      const q = draft.filter.trim().toLowerCase();
-      const filtered = q ? allModels.filter((x) => x.id.toLowerCase().includes(q) || x.name.toLowerCase().includes(q)) : allModels;
-      if (filtered.length && !filtered.some((x) => x.id === draft.modelId)) draft.modelId = filtered[0].id;
-
-      const modelSelect = h(
-        "select.input.model-select",
-        {
-          "aria-label": "Model",
-          disabled: busy || !filtered.length,
-          on: {
-            change: (e) => {
-              draft.modelId = e.target.value;
-              if (isCopilot && /^claude-/i.test(draft.modelId) && draft.thinking === "off") {
-                draft.thinking = "medium";
-                renderPicker(m);
-              }
-            },
-          },
-        },
-        filtered.length
-          ? filtered.map((x) => h("option", { value: x.id, selected: x.id === draft.modelId }, x.name === x.id ? x.id : `${x.name} (${x.id})`))
-          : [h("option", { value: "" }, q ? "No matching models" : "No models available")],
-      );
-
-      const modelLabel = isCopilot ? `Model (${allModels.length} available)` : "Model";
-      if (allModels.length > 15) {
-        const filterInput = h("input.input.model-filter", {
-          type: "search",
-          placeholder: `Filter ${allModels.length} models…`,
-          value: draft.filter,
-          disabled: busy,
-          on: {
-            input: (e) => {
-              draft.filter = e.target.value;
-              const pos = e.target.selectionStart;
-              renderPicker(m);
-              const again = picker.querySelector(".model-filter");
-              if (again) {
-                again.focus();
-                if (pos !== null) again.setSelectionRange(pos, pos);
-              }
-            },
-          },
-        });
-        modelField = h("div.model-pick-stack", null, h("label.model-pick-label", null, modelLabel, filterInput, modelSelect));
-      } else {
-        modelField = h("label.model-pick-label", null, modelLabel, modelSelect);
-      }
-      if (isCopilot && m.copilot?.modelsError) {
-        extraFields.push(h("p.model-error", null, m.copilot.modelsError));
-      }
-      if (!filtered.length) canSave = false;
+    if (provider.custom && !authDraft.touched) {
+      authDraft.baseUrl = provider.customSetup?.baseUrl ?? (m.provider === provider.id ? m.baseUrl ?? "" : "");
+      authDraft.apiKeyEnv = provider.customSetup?.apiKeyEnv ?? (m.provider === provider.id ? m.apiKeyEnv ?? "" : "");
+      authDraft.keyless = provider.customSetup?.authMode === "keyless";
     }
-
+    const providerSelect = h("select.input.model-select", { "aria-label": "Authentication provider", disabled: busy,
+      on: { change: (event) => {
+        authProviderDrafts.set(authDraft.provider, { ...authDraft });
+        authDraft.provider = event.target.value;
+        Object.assign(authDraft, authProviderDrafts.get(authDraft.provider) ?? { provider: authDraft.provider, apiKey: "", baseUrl: "", apiKeyEnv: "", keyless: false, touched: false });
+        renderAuth(m);
+      } },
+    }, providers.map((item) => h("option", { value: item.id, selected: item.id === provider.id }, item.name)));
+    const isCustom = !!provider.custom;
+    const customUrl = String(authDraft.baseUrl ?? "").trim();
+    let safeUrl = false;
+    if (isCustom && customUrl) {
+      try {
+        const parsed = new URL(customUrl);
+        const authority = customUrl.match(/^https?:\/\/([^/?#]*)/i)?.[1];
+        safeUrl = (parsed.protocol === "http:" || parsed.protocol === "https:") && !!authority && !authority.includes("@") && !parsed.username && !parsed.password && !customUrl.includes("?") && !customUrl.includes("#");
+      } catch {}
+    }
+    const hasKey = () => !!authDraft.apiKey.trim();
+    const canSave = () => !busy && !isCopilot && (isCustom
+      ? safeUrl && (authDraft.keyless ? !provider.hasSavedKey : hasKey() || provider.hasSavedKey || !!authDraft.apiKeyEnv.trim())
+      : hasKey());
+    let saveButton;
+    const fields = [];
+    if (isCustom) {
+      fields.push(h("label.model-pick-label", null, "Base URL", h("input.input.mono", {
+        type: "text", inputmode: "url", "aria-label": "Base URL", placeholder: "http://localhost:11434/v1", value: authDraft.baseUrl, disabled: busy,
+        on: { input: (event) => {
+          authDraft.baseUrl = event.target.value;
+          authDraft.touched = true;
+          const start = event.target.selectionStart;
+          const end = event.target.selectionEnd;
+          renderAuth(m);
+          const again = auth.querySelector('[aria-label="Base URL"]');
+          if (again) { again.focus(); if (start !== null && end !== null) again.setSelectionRange(start, end); }
+        } },
+      })));
+      fields.push(h("label.model-pick-label", null, "API key environment variable (optional)", h("input.input.mono", {
+        type: "text", "aria-label": "API key environment variable", placeholder: "SPENCER_CUSTOM_MODEL_KEY", value: authDraft.apiKeyEnv, disabled: busy || authDraft.keyless,
+        on: { input: (event) => { authDraft.apiKeyEnv = event.target.value; authDraft.touched = true; if (saveButton) saveButton.disabled = !canSave(); } },
+      })));
+      fields.push(h("label.switch-row", null, h("input", { type: "checkbox", checked: authDraft.keyless, disabled: busy,
+        on: { change: (event) => { authDraft.keyless = event.target.checked; if (authDraft.keyless) authDraft.apiKeyEnv = ""; authDraft.touched = true; renderAuth(m); } },
+      }), h("span", null, "This endpoint does not require an API key (keyless setup)")));
+      if (authDraft.keyless && provider.hasSavedKey) fields.push(h("p.signin-note", null, "Remove the saved API key before saving this keyless setup."));
+      if (customUrl && !safeUrl) fields.push(h("p.signin-note", null, "Only ordinary HTTP(S) URLs without user info, query strings, or fragments can be saved."));
+      fields.push(h("p.muted", null, "Saving endpoint setup does not change the active model. Choose it in Model selection and select Switch when you want to use it."));
+    }
     if (!isCopilot) {
-      const envName = (m.provider === prov.id && m.apiKeyEnv) || prov.defaultApiKeyEnv;
-      const keyStatus = prov.hasSavedKey
-        ? "API key saved locally (mode 0600)."
-        : prov.hasEnvKey && envName
-          ? `Using ${envName} from environment.`
-          : isCustom
-            ? "Optional for local servers like Ollama."
-            : envName
-              ? `No key found in ${envName}. Paste one below or set ${envName} in the environment.`
-              : "Paste an API key below if required.";
-      const keyInput = h("input.input.mono", {
-        type: "password",
-        autocomplete: "off",
-        placeholder: prov.hasSavedKey ? "Enter a new key to replace saved key…" : "Paste API key…",
-        value: draft.apiKey,
-        disabled: busy,
-        on: { input: (e) => (draft.apiKey = e.target.value) },
-      });
-      const clearBtn = prov.hasSavedKey
-        ? h(
-            "button.btn.sm.ghost",
-            {
-              type: "button",
-              disabled: busy,
-              on: {
-                click: () => {
-                  const id = draft.modelId.trim() || prov.models?.[0]?.id || m.modelId || "";
-                  if (!id) return toast("Pick a model first");
-                  void act(
-                    () =>
-                      api.setModel(prov.id, id, {
-                        clearApiKey: true,
-                        ...(isCustom ? { baseUrl: draft.baseUrl.trim() || m.baseUrl || "http://localhost:11434/v1" } : {}),
-                      }),
-                    "Saved API key removed",
-                  );
-                },
-              },
-            },
-            "Remove saved key",
-          )
-        : null;
-      extraFields.push(
+      const envName = isCustom ? authDraft.apiKeyEnv : provider.defaultApiKeyEnv;
+      const status = provider.hasSavedKey ? "API key saved locally (mode 0600)." : provider.hasEnvKey && envName ? `Using ${envName} from environment.` : isCustom ? "Optional for local servers such as Ollama." : envName ? `No key found in ${envName}.` : "Paste an API key if required.";
+      const keyInput = h("input.input.mono", { type: "password", autocomplete: "off", "aria-label": "API key", placeholder: provider.hasSavedKey ? "Enter a new key to replace the saved key…" : "Paste API key…", value: authDraft.apiKey, disabled: busy || (isCustom && authDraft.keyless), on: { input: (event) => { authDraft.apiKey = event.target.value; authDraft.touched = true; if (saveButton) saveButton.disabled = !canSave(); } } });
+      fields.push(
         h(
           "div.model-key-block",
           null,
           h("label.model-pick-label", null, isCustom ? "API key (optional)" : "API key", keyInput),
-          h("div.model-key-status", null, h("span", null, keyStatus), clearBtn),
+          h(
+            "div.model-key-status",
+            null,
+            h("span", null, status),
+            provider.hasSavedKey
+              ? h("button.btn.sm.ghost", {
+                  type: "button",
+                  disabled: busy,
+                  on: { click: () => void act(
+                    () => api.saveProviderAuth(provider.id, { clearApiKey: true, ...(isCustom ? { baseUrl: customUrl, ...(authDraft.apiKeyEnv.trim() ? { apiKeyEnv: authDraft.apiKeyEnv.trim() } : {}) } : {}) }),
+                    "Saved API key removed",
+                    { preserveDrafts: true },
+                  ) },
+                }, "Remove saved key")
+              : null,
+          ),
         ),
       );
     }
-
-    const saveBtn = h("button.btn.primary", { type: "submit", disabled: busy || !canSave }, "Save & switch");
-    const refreshBtn =
-      isCopilot && m.copilot?.connected
-        ? h("button.btn", { type: "button", disabled: busy, on: { click: () => void refreshCopilot() } }, "Refresh models")
-        : null;
-    const form = h(
-      "form.model-form",
-      {
-        on: {
-          submit: (e) => {
-            e.preventDefault();
-            const mid = draft.modelId.trim();
-            if (!mid) return toast("Pick or enter a model ID");
-            if (isCustom && !draft.baseUrl.trim()) return toast("Base URL is required for OpenAI-compatible servers");
-            const opts = {
-              thinking: isCopilot && /^claude-/i.test(mid) && draft.thinking === "off" ? "medium" : draft.thinking,
-              ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
-              ...(isCustom ? { baseUrl: draft.baseUrl.trim() } : {}),
-            };
-            void act(() => api.setModel(prov.id, mid, opts), `Switched model to ${mid}`);
-          },
-        },
-      },
-      h("div.model-row", null, h("label.model-pick-label", null, "Provider", providerSelect), h("label.model-pick-label.sm", null, "Thinking", thinkingSelect)),
-      modelField,
-      ...extraFields,
-      h("div.model-actions", null, saveBtn, refreshBtn),
-    );
-    picker.replaceChildren(form);
+    const save = isCopilot ? null : (saveButton = h("button.btn.primary", { type: "submit", disabled: !canSave() }, "Save"));
+    auth.replaceChildren(h("p.muted", null, "Set up provider access here without changing the active model."), h("form.model-form", { on: { submit: (event) => {
+      event.preventDefault();
+      if (isCopilot || !canSave()) return;
+      const options = isCustom
+        ? { baseUrl: customUrl, ...(authDraft.apiKeyEnv.trim() ? { apiKeyEnv: authDraft.apiKeyEnv.trim() } : { clearApiKeyEnv: true }), ...(!authDraft.keyless && hasKey() ? { apiKey: authDraft.apiKey.trim() } : {}) }
+        : { apiKey: authDraft.apiKey.trim() };
+      void act(() => api.saveProviderAuth(provider.id, options), isCustom ? "Saved endpoint setup" : `Saved ${provider.name} access`, { preserveDrafts: true, clearAuthDraft: true });
+    } } }, h("div.model-row", null, h("label.model-pick-label", null, "Provider", providerSelect)), ...fields, h("div.model-actions", null, save)));
   };
 
-  // Conversations channels run constantly: they can use their own (cheaper) model. API keys are shared with the picker above.
+  // Conversations channels run constantly: they can use their own (cheaper) model. API keys are shared with provider setup above.
   const cdraft = { same: true, provider: "", modelId: "", thinking: "off", baseUrl: "", filter: "", lastKey: null };
   const syncConvoDraft = (m, force = false) => {
     const c = m.conversation;
@@ -647,10 +545,12 @@ export function modelView(main) {
                 disabled: busy,
                 on: {
                   click: () => {
-                    draft.provider = "github-copilot";
-                    draft.modelId = c.models[0].id;
-                    draft.thinking = /^claude-/i.test(draft.modelId) ? (draft.thinking === "off" ? "medium" : draft.thinking) : "off";
+                    selection.provider = "github-copilot";
+                    selection.modelId = "";
+                    selection.thinking = "off";
+                    authDraft.provider = "github-copilot";
                     renderPicker(m);
+                    renderAuth(m);
                   },
                 },
               },
@@ -702,14 +602,17 @@ export function modelView(main) {
     renderAbout();
     if (!m) {
       picker.replaceChildren();
+      auth.replaceChildren();
       copilot.replaceChildren();
+      copilotTitle.hidden = copilot.hidden = true;
       return;
     }
-    syncDraftFromModel(m);
+    syncCopilotSelection(m);
+    syncCustomSelection(m);
     renderPicker(m);
+    renderAuth(m);
     syncConvoDraft(m);
     renderConvo(m);
-    copilot.replaceChildren(m.copilot.connected ? connectedBox(m) : signInBox(m.copilot));
   };
 
   render();
