@@ -66,7 +66,19 @@ export function bioView(main) {
       return h("div", null, h("h3", null, item.title), h("p", null, item.summary), h("span", null, item.status), select, done, del);
     }));
   };
-  add.addEventListener("click", async () => { const result = await attempt(() => api.addWorkBrief({ title: title.value, summary: summary.value, visibility: visibility.value, source: "owner" })); if (result) { title.value = ""; summary.value = ""; void refreshBrief(); } });
+  add.addEventListener("click", async () => {
+    if (add.disabled) return;
+    const submitted = { title: title.value, summary: summary.value, visibility: visibility.value, source: "owner" };
+    add.disabled = true;
+    try {
+      const result = await attempt(() => api.addWorkBrief(submitted));
+      if (result) {
+        if (title.value === submitted.title) title.value = "";
+        if (summary.value === submitted.summary) summary.value = "";
+        void refreshBrief();
+      }
+    } finally { add.disabled = false; }
+  });
   void refreshBrief();
   const offBrief = on("work_brief", () => void refreshBrief());
   const channels = h("ul.bio-channels");

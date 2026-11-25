@@ -13,7 +13,8 @@
  * `{type:"presence", ch, id, presence, lastSeen}` events (one per channel the member is in).
  */
 import { DatabaseSync } from "node:sqlite";
-import { WorkBriefStore } from "../../spencer/src/work-brief.ts";
+import { WorkBriefStore, validateWorkBriefPublish, workBriefVisibility } from "../../spencer/src/work-brief.ts";
+import { wrapUntrustedNote } from "../../spencer/src/agent/untrusted.ts";
 import { UserError } from "../../spencer/src/channels.ts";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -729,13 +730,15 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
     if (!b && method === "GET") return { items: workBrief.list({ visibility: url.searchParams.get("visibility") || undefined, status: url.searchParams.get("status") || undefined, project: url.searchParams.get("project") || undefined }) };
     if ((!b || b === "publish") && method === "POST") {
       const body = await readJson(req);
+      validateWorkBriefPublish(body);
       const ch = typeof body.notifyChannel === "string" ? channels.get(body.notifyChannel) : undefined;
       if (body.notifyChannel !== undefined && !ch) throw new HttpError(400, "notifyChannel must be a known channel id");
-      const visibility = body.visibility ?? (typeof body.key === "string" ? workBrief.list().find(i => i.key === body.key)?.visibility : undefined) ?? "private";
+      const visibility = workBriefVisibility(body.visibility, typeof body.key === "string" ? workBrief.list().find(i => i.key === body.key)?.visibility : undefined);
       if (ch && (ch.mode === "conversation" || visibility === "private" || (visibility === "trusted" && ch.trust !== "full"))) throw new HttpError(403, "item visibility does not permit this channel");
       const item = workBrief.upsert(body);
       const text = `${item.title}: ${item.summary}`;
-      if (body.notifyOwner || body.wakeOwner) emitOwner(addOwner({ role: body.wakeOwner ? "user" : "note", text }));
+      if (body.wakeOwner) emitOwner(addOwner({ role: "user", text: wrapUntrustedNote(JSON.stringify({ title: item.title, summary: item.summary, source: item.source, links: item.links })) }));
+      else if (body.notifyOwner) emitOwner(addOwner({ role: "note", text, untrusted: true }));
       if (ch) { const message = addMsg(ch.id, me, { text, by: "human", final: body.final === true }); emit({ type: "message", ch: ch.id, message }); }
       return item;
     }

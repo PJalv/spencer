@@ -165,3 +165,28 @@ test("liaison tools call the corresponding local API", async () => {
     assert.deepEqual(calls.filter(c => !c.includes("/api/state")), ["POST /api/work-brief", "GET /api/work-brief?status=active", "GET /api/peers/p/memoir", "POST /api/peers/p/notes", "POST /api/transfers", "GET /api/transfers?ch=c1"]);
   } finally { rmSync(dir, {recursive:true,force:true}); }
 });
+
+test('all channel-taking bridge tools reject ambiguous names but accept exact IDs', async () => {
+  const dir = tmp();
+  writeFileSync(join(dir, 'daemon.json'), JSON.stringify({port:7999}));
+  writeFileSync(join(dir, 'api-token'), 'tok');
+  const writes: string[] = [];
+  const fake = (async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === '/api/state') return new Response(JSON.stringify({channels:[
+      {id:'one',name:'Team'}, {id:'two',name:'TEAM'},
+    ]}));
+    writes.push(path);
+    return new Response(JSON.stringify({items:[],id:'message'}));
+  }) as typeof fetch;
+  try {
+    const tools = Object.fromEntries(spencerTools(dir, fake).map(t => [t.name,t]));
+    for (const name of ['spencer_send_file','spencer_list_transfers','spencer_post_channel','spencer_read_channel']) {
+      const args = {channel:'team',path:'/artifact',text:'hello'};
+      await assert.rejects(tools[name]!.run(args), /ambiguous.*explicit channel ID: one, two/);
+      assert.equal(writes.length, 0);
+    }
+    await tools.spencer_send_file!.run({channel:'two',path:'/artifact'});
+    assert.deepEqual(writes, ['/api/transfers']);
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});

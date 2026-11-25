@@ -8,6 +8,21 @@ export interface WorkBriefItem {
   source: string | null; updatedAt: number; expiresAt: number | null;
 }
 export type WorkBriefInput = Partial<Omit<WorkBriefItem, 'id' | 'updatedAt'>>;
+
+export function workBriefVisibility(value: unknown, fallback: WorkBriefItem['visibility'] = 'private'): WorkBriefItem['visibility'] {
+  if (value === undefined) return fallback;
+  if (value === 'private' || value === 'trusted' || value === 'public') return value;
+  throw new UserError(400, 'visibility must be private, trusted, or public');
+}
+
+/** Shared validation for the production and development publish endpoints. */
+export function validateWorkBriefPublish(body: Record<string, unknown>): void {
+  workBriefVisibility(body.visibility);
+  for (const key of ['notifyOwner', 'wakeOwner', 'final']) {
+    if (body[key] !== undefined && typeof body[key] !== 'boolean') throw new UserError(400, `${key} must be boolean`);
+  }
+}
+
 export class WorkBriefStore {
   private db: DatabaseSync;
   private changed: (immediate: boolean) => void;
@@ -52,14 +67,18 @@ export class WorkBriefStore {
         return s;
       };
       const v = { ...old, ...input };
-      const visibility = v.visibility ?? 'private', status = v.status ?? 'active';
-      if (!['private','trusted','public'].includes(visibility) || !['active','blocked','done'].includes(status)) throw new UserError(400, 'invalid visibility or status');
+      const visibility = workBriefVisibility(input.visibility, old?.visibility), status = v.status ?? 'active';
+      if (!['active','blocked','done'].includes(status)) throw new UserError(400, 'invalid status');
       if (v.expiresAt != null && (typeof v.expiresAt !== 'number' || !Number.isFinite(v.expiresAt))) throw new UserError(400, 'invalid expiry');
       if (v.links !== undefined && (!Array.isArray(v.links) || v.links.length > 10)) throw new UserError(400, 'links must be an array of at most 10 strings');
       const item: WorkBriefItem = { id: old?.id ?? randomUUID(), key: clean(v.key, 'key', 500, true), visibility, project: clean(v.project, 'project', 80, true), title: clean(v.title, 'title', 160)!, summary: clean(v.summary, 'summary', 1000)!, status, links: (v.links ?? []).map(l => clean(l, 'link', 500)!), source: clean(v.source, 'source', 80, true), updatedAt: Date.now(), expiresAt: v.expiresAt ?? null };
       restrictive = !!old && (item.status === 'done' || (old.visibility === 'public' && item.visibility !== 'public') || (old.visibility === 'trusted' && item.visibility === 'private'));
       if (item.status !== 'done' && items.filter(i => i.id !== item.id && i.status !== 'done').length >= 50) throw new UserError(400, 'work brief limit reached');
       this.db.prepare(`INSERT INTO work_brief_items VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET key=excluded.key,visibility=excluded.visibility,project=excluded.project,title=excluded.title,summary=excluded.summary,status=excluded.status,links=excluded.links,source=excluded.source,updated_at=excluded.updated_at,expires_at=excluded.expires_at`).run(item.id,item.key,item.visibility,item.project,item.title,item.summary,item.status,JSON.stringify(item.links),item.source,item.updatedAt,item.expiresAt);
+      this.db.exec(`DELETE FROM work_brief_items WHERE id IN (
+        SELECT id FROM work_brief_items WHERE status='done'
+        ORDER BY updated_at DESC, rowid DESC LIMIT -1 OFFSET 25
+      )`);
       return item;
     });
     this.scheduleExpiry(); this.changed(restrictive); return result;

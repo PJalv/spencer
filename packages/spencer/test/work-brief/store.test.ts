@@ -30,3 +30,33 @@ test('visibility slices keep private and trusted work out of peer prompts', () =
   assert.ok(!standard.includes('private') && !standard.includes('trusted') && standard.includes('public'));
   db.close();
 });
+
+test('invalid visibility cannot overwrite an existing item; undefined preserves it', () => {
+  const db = new DatabaseSync(':memory:'); const store = new WorkBriefStore(db);
+  try {
+    const original = store.upsert({key:'stable', title:'Public', summary:'safe', visibility:'public'});
+    for (const visibility of [null, false, 42, {}, [], '', 'PRIVATE']) {
+      assert.throws(() => store.upsert(JSON.parse(JSON.stringify({key:'stable', summary:'SECRET', visibility}))), /visibility/);
+      assert.deepEqual(store.list(), [original]);
+    }
+    assert.equal(store.upsert({key:'stable', summary:'updated', visibility:undefined}).visibility, 'public');
+  } finally { store.stop(); db.close(); }
+});
+
+test('completed retention evicts the oldest completed items and preserves live items', () => {
+  const db = new DatabaseSync(':memory:'); const store = new WorkBriefStore(db);
+  try {
+    const active = store.upsert({title:'active', summary:'live'});
+    const blocked = store.upsert({title:'blocked', summary:'live', status:'blocked'});
+    const first = store.upsert({key:'old', title:'old', summary:'done', status:'done'});
+    db.prepare('UPDATE work_brief_items SET updated_at=0 WHERE id=?').run(first.id);
+    for (let i=0; i<25; i++) store.upsert({title:`done ${i}`, summary:'done', status:'done'});
+    assert.equal(store.list({status:'done'}).length, 25);
+    assert.ok(!store.list().some(i => i.id === first.id));
+    assert.ok(store.list().some(i => i.id === active.id));
+    assert.ok(store.list().some(i => i.id === blocked.id));
+    store.upsert({status:'done'}, active.id);
+    assert.equal(store.list({status:'done'}).length, 25);
+    assert.equal(store.list().length, 26);
+  } finally { store.stop(); db.close(); }
+});

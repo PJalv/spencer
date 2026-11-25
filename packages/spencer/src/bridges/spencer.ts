@@ -103,7 +103,10 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
   async function channel(ref: string): Promise<Channel> {
     const { channels } = await state();
     const want = ref.trim().toLowerCase();
-    const found = channels.find((c) => c.id === ref) ?? channels.find((c) => c.name.toLowerCase() === want);
+    const exact = channels.find((c) => c.id === ref);
+    const matches = channels.filter((c) => c.name.toLowerCase() === want);
+    if (!exact && matches.length > 1) throw new ToolError(`ambiguous channel "${ref}". Use an explicit channel ID: ${matches.map(c => c.id).join(", ")}`);
+    const found = exact ?? matches[0];
     if (!found) throw new ToolError(`no channel "${ref}". Channels: ${channels.map((c) => `${c.name} (${c.id})`).join(", ") || "none"}`);
     return found;
   }
