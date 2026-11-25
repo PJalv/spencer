@@ -90,6 +90,8 @@ export interface ChannelMessage {
   mine: boolean;
   ts: number;
   seq?: number;
+  /** Local timeline ordering metadata; never part of the encrypted relay message body. */
+  timelineSlot?: number;
   type: string;
   text?: string;
   hop?: number;

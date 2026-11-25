@@ -64,6 +64,7 @@ export interface MessageRow {
   status: string;
   origin: string | null;
   note: string | null;
+  timeline_slot?: number;
 }
 
 /** Error with an HTTP status hint for the API layer. */
@@ -300,6 +301,7 @@ export class ChannelManager {
       type: r.type,
       status: r.status as ChannelMessage["status"],
     };
+    if (r.timeline_slot !== undefined) m.timelineSlot = r.timeline_slot;
     const name = this.peerName(r.ch, r.from_id);
     if (name) m.fromName = name;
     if (r.seq !== null) m.seq = r.seq;
@@ -317,7 +319,7 @@ export class ChannelManager {
   }
 
   message(id: string): ChannelMessage | undefined {
-    const r = this.d.sql.get<MessageRow>("SELECT * FROM messages WHERE id = ?", id);
+    const r = this.d.sql.get<MessageRow>("SELECT *, rowid AS timeline_slot FROM messages WHERE id = ?", id);
     return r ? this.toMessage(r) : undefined;
   }
 
@@ -328,21 +330,67 @@ export class ChannelManager {
   messages(ch: string, limit: number, before?: string, types: string[] = ["chat"]): ChannelMessage[] {
     const lim = Math.max(1, Math.min(1000, Math.floor(limit) || 100));
     const typeIn = `type IN (${types.map(() => "?").join(", ")})`;
-    let rows: MessageRow[];
-    if (before) {
-      const b = this.d.sql.get<{ rowid: number }>("SELECT rowid FROM messages WHERE id = ? AND ch = ?", before, ch);
-      if (!b) throw new UserError(404, "unknown message");
-      rows = this.d.sql.all<MessageRow>(
-        `SELECT * FROM messages WHERE ch = ? AND COALESCE(origin, '') != 'feature-hello' AND ${typeIn} AND rowid < ? ORDER BY rowid DESC LIMIT ?`,
-        ch,
-        ...types,
-        b.rowid,
-        lim,
-      );
-    } else {
-      rows = this.d.sql.all<MessageRow>(`SELECT * FROM messages WHERE ch = ? AND COALESCE(origin, '') != 'feature-hello' AND ${typeIn} ORDER BY rowid DESC LIMIT ?`, ch, ...types, lim);
+    const visible = `COALESCE(origin, '') != 'feature-hello' AND ${typeIn}`;
+    if (before && !this.d.sql.get(`SELECT 1 FROM messages WHERE ch = ? AND id = ? AND ${visible}`, ch, before, ...types)) {
+      throw new UserError(404, "unknown message");
     }
-    return rows.reverse().map((r) => this.toMessage(r));
+    // Relay sequences reorder accepted visible messages into their existing rowid slots.
+    // Keep the full ordering and parent correction in SQLite so only the requested page is
+    // materialized by the API process. Omitted body types must not consume UI slots.
+    const orderedRows = `
+      WITH seq_slots AS (
+        SELECT rowid AS slot_rowid, ROW_NUMBER() OVER (ORDER BY rowid) AS slot_no
+        FROM messages WHERE ch = ? AND seq IS NOT NULL AND ${visible}
+      ), seq_rows AS (
+        SELECT rowid, ROW_NUMBER() OVER (ORDER BY seq, rowid) AS seq_no
+        FROM messages WHERE ch = ? AND seq IS NOT NULL AND ${visible}
+      ), base_order AS (
+        SELECT slots.slot_rowid AS timeline_order, rows.rowid
+        FROM seq_slots slots JOIN seq_rows rows ON rows.seq_no = slots.slot_no
+        UNION ALL
+        SELECT rowid AS timeline_order, rowid FROM messages WHERE ch = ? AND seq IS NULL AND ${visible}
+      ), segmented AS (
+        SELECT o.timeline_order, o.rowid, m.seq,
+          SUM(CASE WHEN m.seq IS NOT NULL THEN 1 ELSE 0 END)
+            OVER (ORDER BY o.timeline_order ROWS UNBOUNDED PRECEDING) AS segment_no
+        FROM base_order o JOIN messages m ON m.rowid = o.rowid
+      ), parent_targets AS (
+        SELECT parent.rowid AS parent_rowid, MIN(child.timeline_order) AS target_order
+        FROM segmented parent
+        JOIN messages p ON p.rowid = parent.rowid
+        JOIN segmented child ON child.timeline_order < parent.timeline_order AND child.seq IS NOT NULL
+        JOIN messages c ON c.rowid = child.rowid
+        WHERE parent.seq IS NULL AND json_valid(c.body) AND json_extract(c.body, '$.replyTo') = p.id
+        GROUP BY parent.rowid
+      ), block_targets AS (
+        SELECT parent.segment_no, MIN(target.target_order) AS target_order
+        FROM segmented parent JOIN parent_targets target ON target.parent_rowid = parent.rowid
+        GROUP BY parent.segment_no
+      ), moved AS (
+        SELECT item.rowid, target.target_order,
+          ROW_NUMBER() OVER (PARTITION BY target.target_order ORDER BY item.timeline_order, item.rowid) AS move_no,
+          COUNT(*) OVER (PARTITION BY target.target_order) AS move_count
+        FROM segmented item JOIN block_targets target ON target.segment_no = item.segment_no
+        WHERE item.seq IS NULL
+      ), final_order AS (
+        SELECT item.timeline_order AS sort_order, item.rowid FROM segmented item
+        WHERE NOT EXISTS (SELECT 1 FROM moved WHERE moved.rowid = item.rowid)
+        UNION ALL
+        SELECT target_order - 1 + 1.0 * move_no / (move_count + 1), rowid FROM moved
+      ), ranked AS (
+        SELECT rowid, ROW_NUMBER() OVER (ORDER BY sort_order, rowid) AS position FROM final_order
+      )`;
+    const orderArgs = [ch, ...types, ch, ...types, ch, ...types];
+    const cursorClause = before ? "AND page.position < (SELECT position FROM ranked r JOIN messages c ON c.rowid = r.rowid WHERE c.ch = ? AND c.id = ?)" : "";
+    const rows = this.d.sql.all<MessageRow>(
+      `${orderedRows} SELECT m.*, m.rowid AS timeline_slot FROM ranked page JOIN messages m ON m.rowid = page.rowid
+       WHERE m.ch = ? ${cursorClause} ORDER BY page.position DESC LIMIT ?`,
+      ...orderArgs,
+      ch,
+      ...(before ? [ch, before] : []),
+      lim,
+    ).reverse();
+    return rows.map((r) => this.toMessage(r));
   }
 
   markRead(ch: string): void {

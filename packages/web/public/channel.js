@@ -15,6 +15,7 @@ import { navigate } from "./router.js";
 import { draftFileError, hasDraftFile, uploadDraftBatch } from "./draft-batch.js";
 import { createFilePicker, createDraftRecipientSelect, createDraftRemoveButton, refreshDraftRecipientOptions, scrollAfterAcceptedFile } from "./draft-dom.js";
 import { clearSentDraftsWhenNoWork, discardEmptyChannelDraftState, getChannelDraftState, markUploadFailure, releaseRecipientAfterDefiniteFailure, removeDraft, resolveUploadSuccess, selectDraftRecipient } from "./draft-state.js";
+import { timelineItems } from "./timeline-order.js";
 
 const NOTE_LABEL = {
   "not addressed": "Your Spencer stayed quiet: it was not addressed.",
@@ -630,6 +631,8 @@ export function channelView(main, chId) {
   const st = stage(scroller, keeper);
   const members = h("aside.members", { "aria-label": "Members and access" });
   let hasOlder = false;
+  let messagesLoaded = false;
+  let historyExpansionPending = false;
   let membersOpen = wide() && membersPref();
 
   const send = async (text) => {
@@ -950,10 +953,9 @@ export function channelView(main, chId) {
     const byId = new Map(msgs.map((m) => [m.id, m]));
     const names = [S.me?.name, ...c.members.map((m) => m.name)].filter(Boolean);
     const myNames = [S.me?.name, ...c.members.filter((m) => m.me).map((m) => m.name)].filter(Boolean);
-    const items = [
-      ...msgs.map((m) => ({ ts: m.ts, m })),
-      ...[...S.transfers.values()].filter((t) => t.ch === chId).map((t) => ({ ts: t.createdAt, t })),
-    ].sort((a, b) => a.ts - b.ts);
+    const historyExpanded = historyExpansionPending;
+    historyExpansionPending = false;
+    const items = timelineItems(msgs, [...S.transfers.values()].filter((t) => t.ch === chId), messagesLoaded && !hasOlder, historyExpanded);
     const nodes = [];
     if (!items.length) {
       nodes.push(
@@ -1000,6 +1002,7 @@ export function channelView(main, chId) {
     }
     const items = r.items ?? [];
     hasOlder = items.length >= 100;
+    messagesLoaded = true;
     setMessages(chId, items);
     requestAnimationFrame(() => keeper.toBottom());
   };
@@ -1012,10 +1015,14 @@ export function channelView(main, chId) {
     const r = await attempt(() => api.channelMessages(chId, 100, first.id));
     olderBtn.disabled = false;
     if (!r) return;
-    const older = (r.items ?? []).filter((m) => !msgs.some((x) => x.id === m.id));
+    const current = S.messages.get(chId) ?? [];
+    if (current[0]?.id !== first.id) return; // response cursor belongs to a window that moved while it was in flight
+    const currentIds = new Set(current.map((m) => m.id));
+    const older = (r.items ?? []).filter((m) => !currentIds.has(m.id));
     hasOlder = (r.items ?? []).length >= 100;
     const prevH = scroller.scrollHeight;
-    setMessages(chId, [...older, ...(S.messages.get(chId) ?? [])]);
+    historyExpansionPending = older.length > 0;
+    setMessages(chId, [...older, ...current]);
     scroller.scrollTop = scroller.scrollHeight - prevH;
   });
 

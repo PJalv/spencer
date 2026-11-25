@@ -74,8 +74,8 @@ export const api = {
     xhr.addEventListener("abort", () => reject(new ApiError("Upload was cancelled", 0)));
     xhr.send(file);
   }),
-  channelMessages: (ch, limit = 100, before) =>
-    request("GET", `/api/channels/${enc(ch)}/messages?limit=${limit}${before !== undefined ? `&before=${enc(before)}` : ""}`),
+  channelMessages: (ch, limit = 100, before, markRead = true) =>
+    request("GET", `/api/channels/${enc(ch)}/messages?limit=${limit}${before !== undefined ? `&before=${enc(before)}` : ""}${markRead ? "" : "&markRead=false"}`),
   channelSend: (ch, text, mentions) => request("POST", `/api/channels/${enc(ch)}/messages`, mentions?.length ? { text, mentions } : { text }),
   patchChannel: (ch, patch) => request("PATCH", `/api/channels/${enc(ch)}`, patch),
   leaveChannel: (ch) => request("DELETE", `/api/channels/${enc(ch)}`),

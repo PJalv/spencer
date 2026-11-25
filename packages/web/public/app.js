@@ -9,6 +9,7 @@ import {
   upsertChannel,
   removeChannel,
   upsertMessage,
+  maxMessageSequence,
   upsertTransfer,
   upsertOwner,
   upsertRequest,
@@ -36,6 +37,7 @@ import { parseHash, hashFor, navigate } from "./router.js";
 import { setSidebarOpen, syncAttention, presenceInfo, mark, activityLine, skeleton } from "./common.js";
 import { ownerView } from "./owner.js";
 import { channelView } from "./channel.js";
+import { loadMessageWindow } from "./message-window.js";
 import { transfersView } from "./transfers.js";
 import { mcpView } from "./mcp.js";
 import { bioView } from "./bio.js";
@@ -285,6 +287,7 @@ function onRoute() {
 }
 
 const PAGE_TITLES = { bio: "Bio", peers: "Peers", model: "Model", mcp: "MCP servers", soul: "Soul", transfers: "Transfers", inbox: "Needs you" };
+const timelineRefreshGeneration = new Map();
 
 function syncTitle() {
   const c = S.view.name === "channel" ? S.channels.get(S.view.ch) : null;
@@ -312,7 +315,13 @@ function handleEvent(ev) {
       break;
     case "message":
       if (ev.ch && ev.message?.id) {
+        const current = S.messages.get(ev.ch) ?? [];
+        const previous = current.find((m) => m.id === ev.message.id);
+        const maxSeq = maxMessageSequence(current);
+        const acknowledged = previous && Number.isSafeInteger(ev.message.seq) && previous.seq !== ev.message.seq;
+        const outOfOrderReplay = !previous && Number.isSafeInteger(ev.message.seq) && ev.message.seq < maxSeq;
         upsertMessage(ev.ch, ev.message);
+        if (acknowledged || outOfOrderReplay) void refreshLoadedMessageWindow(ev.ch);
         // The reply landed: whoever was "working" on it is done.
         if (ev.message.type === "chat" && ev.message.replyTo) clearWorkingFor(ev.ch, ev.message.from, ev.message.replyTo);
       }
@@ -379,6 +388,27 @@ function handleEvent(ev) {
     default:
       break;
   }
+}
+
+function refreshLoadedMessageWindow(ch) {
+  const generation = (timelineRefreshGeneration.get(ch) ?? 0) + 1;
+  timelineRefreshGeneration.set(ch, generation);
+  const required = new Set((S.messages.get(ch) ?? []).map((m) => m.id));
+  if (!required.size) return;
+
+  void loadMessageWindow(
+    (before) => api.channelMessages(ch, 100, before, false),
+    required,
+    () => (S.messages.get(ch) ?? []).map((m) => m.id),
+  ).then((loaded) => {
+    if (!loaded || timelineRefreshGeneration.get(ch) !== generation) return;
+    const loadedIds = new Set(loaded.map((m) => m.id));
+    if ((S.messages.get(ch) ?? []).some((m) => !loadedIds.has(m.id))) {
+      refreshLoadedMessageWindow(ch);
+      return;
+    }
+    setMessages(ch, loaded);
+  }).catch((err) => console.warn(`could not refresh ordering for ${ch}`, err));
 }
 
 async function refresh(full) {

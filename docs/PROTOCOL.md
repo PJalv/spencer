@@ -526,7 +526,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/owner/answers/:submissionId?wait=` | The answer to that one owner message, waiting up to `wait` seconds (0-30): `{status: "pending"}`, `{status: "done", text}` (capped at 20,000 chars) or `{status: "unanswered", reason}` |
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
-| GET | `/api/channels/:ch/messages?limit=&before=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read. |
+| GET | `/api/channels/:ch/messages?limit=&before=&markRead=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read unless `markRead=false`; this is used for passive timeline reconciliation. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
 | PATCH | `/api/channels/:ch` | `{name?, autoReply?, shareBio?: boolean, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
@@ -607,7 +607,8 @@ interface ChannelMessage { id: string; ch: string; from: string; fromName?: stri
                    // "handled by owner" (it woke an owner follow-up, §7.4),
                    // "out of messages", "not in this conversation" (§7.5)
   convo?: { id: string; start?: true; heated?: true; mod?: true };   // Conversations channels (§7.5)
-  origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"agent-conversation"|"peer" }   // agent-followup: §7.4, agent-conversation: §7.5
+  origin?: "human"|"owner-agent"|"agent-reply"|"agent-followup"|"agent-conversation"|"peer"; // agent-followup: §7.4, agent-conversation: §7.5
+  timelineSlot?: number }     // local API/WebSocket only: persistent insertion slot for optimistic ordering; not relayed
 interface Transfer { via?: "link"|"croc"; tid: string; ch: string; direction: "out"|"in"; peer: string; peerName?: string;
   name: string; size: number; sha256: string; state: string; attempt: number; initiatedBy: "owner"|"peer-agent"|"owner-agent"|"peer";
   reason?: string;     // free text from whoever initiated it, e.g. the peer agent's justification
