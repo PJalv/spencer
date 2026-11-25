@@ -351,6 +351,7 @@ export class Daemon {
       transfers: () => this.need("transfers"),
       ownerAttachments: new OwnerAttachmentStore(this.need("db"), this.dataDir),
       state: () => this.apiState(),
+      resetP2p: (ch) => { this.s.links?.clearCrashDisable(ch); return this.s.links?.status(); },
       channelMessages: (ch, limit, before, markRead = true) => {
         const items = channels.messages(ch, limit, before, ["chat", "hello"]);
         if (markRead && !before) channels.markRead(ch);
@@ -655,7 +656,18 @@ export class Daemon {
     return {
       db: this.need("db"),
       dataDir: this.dataDir,
-      p2p: this.need("p2pAdapter").adapter,
+      p2p: { ...this.need("p2pAdapter").adapter, ineligibleReason: (ch, peerId) => {
+        const cfg = this.need("cfg");
+        if (cfg.p2p.mode !== "files") return "direct links disabled in config";
+        if (!this.s.links?.status().available) return "addon unavailable";
+        if (channels.directLinkConfig(ch)?.directLink === "off") return "direct links disabled for this channel";
+        if (this.s.links.isCrashDisabled(ch)) return "temporarily disabled after crash";
+        if (!channels.peerHasFeature(ch, peerId, P2P_FILES_FEATURE)) return "peer lacks p2p-files/1";
+        const info = channels.info(ch);
+        const conn = info && this.s.pool?.peek(info.relayUrl);
+        if (!conn?.ready || !conn.features.includes("ephemeral")) return "relay lacks ephemeral";
+        return "direct link failed";
+      } },
       me,
       policy: () => this.need("cfg").policy,
       trust: (ch) => channels.get(ch)?.trust ?? "standard",
@@ -677,6 +689,9 @@ export class Daemon {
       ...(this.need("cfg").croc.throttleUpload ? { crocThrottleUpload: this.need("cfg").croc.throttleUpload! } : {}),
       events: this.events,
       log: this.log,
+      channelTransferNote: (ch, text, opts) => {
+        this.s.agent?.channelNote?.(ch, text, opts).catch((e: Error) => this.log(`agent.channelNote: ${e.message}`));
+      },
       ownerNote: (text, opts) => {
         const a = this.s.agent;
         if (!a) {

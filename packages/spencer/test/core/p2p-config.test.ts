@@ -142,6 +142,7 @@ test("custom invite uses its relay and channel link settings are validated", asy
     const beforeMessages = bob.daemon.channels.messages(channel.id, 50, undefined, ["chat", "hello"]);
     assert.ok(beforeMessages.some((m) => m.from === alice.daemon.identity.id && m.type === "hello"), "initial Alice hello is visible");
     alice.daemon.channels["d"].localFeatures = () => ["p2p-files/1"];
+    assert.deepEqual(alice.daemon.core.getChannel(channel.id)?.members.find(m => m.me)?.features, ["p2p-files/1"]);
     alice.daemon.channels.recheckHellos();
     await waitFor(() => bob.daemon.core.getChannel(channel.id)?.members.some((m) => m.id === alice.daemon.identity.id && m.features?.includes("p2p-files/1")), "feature hello");
     const afterMessages = bob.daemon.channels.messages(channel.id, 50, undefined, ["chat", "hello"]);

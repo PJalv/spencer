@@ -2,7 +2,8 @@
  * File transfer state machine (docs/PROTOCOL.md §6). Control messages go through the durable outbox
  * (deps.enqueue, always in the same SQLite transaction as the state change); bytes go through croc.
  */
-import { chmodSync, constants as fsc, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
+import { chmodSync, constants as fsc, existsSync, lstatSync, readdirSync, renameSync, unlinkSync, copyFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,7 +91,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     });
   const backoff = options.backoffMs ?? defaultBackoff;
   const sweepIntervalMs = options.sweepIntervalMs ?? 30_000;
-  const maxUploadBytes = 25 * 1024 * 1024;
+  const maxUploadBytes = 256 * 1024 * 1024;
   const noRelayRetryMs = options.noRelayRetryMs ?? 5000;
   const watchdogMs = options.watchdogMs ?? 1000;
   const maxPreviewBytes = 1024 * 1024;
@@ -111,6 +112,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
   let stopped = false;
 
   const ttlMs = () => Math.max(1, deps.policy().transferTtlHours) * 3_600_000;
+  const uploaded = new Map<string, { size: number; sha256: string }>();
   const maxAttempts = () => Math.max(1, deps.policy().maxTransferAttempts || 5);
   const outDir = (tid: string) => join(dirs.outgoing, tid);
   const inDir = (tid: string) => join(dirs.incoming, tid);
@@ -331,8 +333,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       return;
     }
     if (!info) {
-      transition(tid, (x) => x.state === "sending" && x.attempt === r.attempt && x.error !== NO_RELAY, { error: NO_RELAY });
-      schedule(tid, noRelayRetryMs, () => startSend(tid));
+      retrySend(tid, r.attempt, `no croc relay and direct link unavailable: ${deps.p2p?.ineligibleReason?.(r.ch, r.peer, r.size, false) ?? "direct links disabled"}`, Math.min(30000, noRelayRetryMs * 2 ** (r.attempt - 1)));
       return;
     }
     const attempt = r.attempt;
@@ -368,7 +369,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
   }
 
   /** Attempt `failedAttempt` failed (croc error or file_retry): back off and re-spawn, or give up. */
-  function retrySend(tid: string, failedAttempt: number, error: string | undefined): void {
+  function retrySend(tid: string, failedAttempt: number, error: string | undefined, delayOverride?: number): void {
     const r = store.get(tid);
     if (!r || r.direction !== "out" || r.state !== "sending" || r.attempt !== failedAttempt) return;
     killJob(tid);
@@ -382,7 +383,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       );
       return;
     }
-    const delay = Math.max(0, backoff(failedAttempt));
+    const delay = Math.max(0, delayOverride ?? backoff(failedAttempt));
     const n = transition(tid, guard, { attempt: failedAttempt + 1, nextAttemptAt: now() + delay, error: clip(error) ?? null });
     if (n) schedule(tid, delay, () => startSend(tid));
   }
@@ -538,7 +539,10 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     const n = transition(tid, guard, { state: "completed", path: dest, error: null }, (x) => [
       body("file_ack", x, { ok: true, sha256: hash }),
     ]);
-    if (n) note(`Received file "${n.name}" (${fmtBytes(n.size)}) from ${peerLabel(n)}. Saved (unopened) to ${dest}`);
+    if (n) {
+      note(`Received file "${n.name}" (${fmtBytes(n.size)}) from ${peerLabel(n)}. Saved (unopened) to ${dest}`);
+      deps.channelTransferNote?.(n.ch, `Received file "${n.name}" (${fmtBytes(n.size)}), transfer ${n.tid}.${deps.trust?.(n.ch) === "full" ? ` Quarantine path: ${dest}` : ""}`, { untrusted: true });
+    }
     else rmrf(qdir);
     return true;
   }
@@ -757,7 +761,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         if (!/^[A-Za-z0-9_-]{16,64}$/.test(req.uploadId)) throw new TransferError("bad_request", "invalid upload retry id");
         const previous = store.byUploadId(req.uploadId);
         if (previous) {
-          const sha256 = await sha256File(path);
+          const sha256 = uploaded.get(path)?.sha256 ?? await sha256File(path);
           if (previous.ch !== ch || (req.to !== undefined && previous.peer !== req.to) || previous.name !== name || previous.size !== st.size || previous.sha256 !== sha256) {
             throw new TransferError("conflict", "upload retry id was already used for different content or recipient");
           }
@@ -783,8 +787,17 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       try {
         await ensureDirAsync(dirs.outgoing);
         await ensureDirAsync(dir);
-        size = await stageCopy(path, staged);
-        sha256 = await sha256File(staged);
+        const metadata = uploaded.get(path);
+        if (metadata) {
+          try { renameSync(path, staged); } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
+            copyFileSync(path, staged, fsc.COPYFILE_EXCL); unlinkSync(path);
+          }
+          size = metadata.size; sha256 = metadata.sha256;
+        } else {
+          size = await stageCopy(path, staged);
+          sha256 = await sha256File(staged);
+        }
       } catch (e) {
         rmrf(dir);
         throw new TransferError("bad_request", `cannot stage file: ${(e as Error).message}`);
@@ -796,7 +809,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       const policy = deps.policy();
       // A fully trusted channel needs no approval; otherwise the policy decides, and a peer's ask always does.
       const trusted = deps.trust?.(ch) === "full";
-      const needsApproval = !trusted && (req.initiatedBy === "peer-agent" || policy.requireApprovalForOutgoingFiles);
+      const needsApproval = !trusted && req.initiatedBy !== "owner" && (req.initiatedBy === "peer-agent" || policy.requireApprovalForOutgoingFiles);
       const t = now();
       const row: TransferRow = {
         tid,
@@ -864,13 +877,15 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       const path = join(dir, name);
       let handle: Awaited<ReturnType<typeof open>> | undefined;
       let size = 0;
+      const hash = createHash("sha256");
       try {
         await ensureDirAsync(dir);
         handle = await open(path, "wx", 0o600);
         for await (const chunk of upload.bytes) {
           if (!(chunk instanceof Uint8Array)) throw new TransferError("bad_request", "upload contains invalid data");
           size += chunk.byteLength;
-          if (size > maxUploadBytes) throw new TransferError("bad_request", "file exceeds the 25 MiB upload limit");
+          hash.update(chunk);
+          if (size > maxUploadBytes) throw new TransferError("too_large", "file exceeds the 256 MiB upload limit");
           try {
             await writeAll(handle, chunk);
           } catch (e) {
@@ -880,12 +895,14 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         await handle.close();
         handle = undefined;
         if (stopped) throw new TransferError("stopped", "transfer service is stopped");
+        uploaded.set(path, { size, sha256: hash.digest("hex") });
         return await this.request(ch, { path, to: upload.to, initiatedBy: "owner", uploadId: upload.uploadId });
       } catch (e) {
         if (e instanceof TransferError) throw e;
         throw new TransferError("bad_request", `cannot stage uploaded file: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
         await handle?.close().catch(() => {});
+        uploaded.delete(path);
         rmrf(dir);
       }
     },
@@ -951,7 +968,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
           return;
         case "file_retry":
           if (r.direction !== "out") return;
-          retrySend(r.tid, b.attempt, "recipient's croc failed");
+          retrySend(r.tid, b.attempt, r.via === "link" ? "recipient's direct link failed" : "recipient's croc failed");
           return;
         case "file_ack": {
           if (r.direction !== "out") return;
@@ -984,13 +1001,59 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       return r ? toApi(r) : undefined;
     },
 
+    async download(tid) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) throw new TransferError("bad_request", "invalid transfer id");
+      const r = store.get(tid);
+      if (!r) throw new TransferError("not_found", "unknown transfer");
+      if (r.direction !== "in" || r.state !== "completed" || !r.path) throw new TransferError("bad_request", "only completed incoming quarantine files are available");
+      const expected = resolve(dirs.quarantine, tid, sanitizeFileName(r.name));
+      if (resolve(r.path) !== expected) throw new TransferError("bad_request", "invalid quarantine path");
+      try {
+        for (const dir of [dirs.quarantine, join(dirs.quarantine, tid)]) {
+          const st = lstatSync(dir);
+          if (!st.isDirectory() || st.isSymbolicLink()) throw new TransferError("bad_request", "invalid quarantine directory");
+        }
+        const handle = await open(expected, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+        try {
+          if (!(await handle.stat()).isFile()) throw new TransferError("bad_request", "not a regular file");
+          return { name: r.name, handle };
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+      } catch (e) {
+        if (e instanceof TransferError) throw e;
+        throw new TransferError("bad_request", "quarantine file is missing or unsafe");
+      }
+    },
+
+    async deleteFile(tid) {
+      const file = await this.download!(tid);
+      try {
+        const r = store.get(tid)!;
+        const opened = await file.handle.stat();
+        for (const dir of [dirs.quarantine, join(dirs.quarantine, tid)]) {
+          const st = lstatSync(dir);
+          if (!st.isDirectory() || st.isSymbolicLink()) throw new TransferError("bad_request", "invalid quarantine directory");
+        }
+        const current = lstatSync(r.path!);
+        if (current.isSymbolicLink() || current.ino !== opened.ino || current.dev !== opened.dev) throw new TransferError("bad_request", "quarantine file changed");
+        unlinkSync(r.path!);
+        return toApi(transition(tid, x => x.state === "completed" && x.direction === "in", { path: null })!);
+      } finally { await file.handle.close(); }
+    },
+
     async preview(tid): Promise<TransferPreview> {
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) throw new TransferError("bad_request", "invalid transfer id");
       const r = store.get(tid);
       if (!r) throw new TransferError("not_found", "unknown transfer");
       if (r.direction !== "in" || r.state !== "completed") throw new TransferError("bad_request", "only completed incoming files can be previewed");
       const extension = extname(r.name).toLowerCase();
-      const kind = extension === ".md" || extension === ".markdown" ? "markdown" : extension === ".html" || extension === ".htm" ? "html" : null;
+      const mimeTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
+      const mimeType = mimeTypes[extension];
+      const textExtensions = new Set(".txt .json .log .diff .patch .csv .tsv .yaml .yml .toml .xml .ini .sh .py .js .mjs .ts .tsx .jsx .css .sql .rs .go .c .h .cpp .java .rb .nix".split(" "));
+      const kind = extension === ".md" || extension === ".markdown" ? "markdown" : extension === ".html" || extension === ".htm" ? "html" : mimeType ? "image" : textExtensions.has(extension) || r.name.endsWith(".env.example") ? "text" : null;
+      const previewLimit = kind === "image" ? 10 * 1024 * 1024 : maxPreviewBytes;
       if (!kind) throw new TransferError("bad_request", "unsupported preview file type");
       const expected = resolve(dirs.quarantine, tid, sanitizeFileName(r.name));
       if (!r.path || resolve(r.path) !== expected) throw new TransferError("bad_request", "file is not at its quarantine location");
@@ -1004,19 +1067,20 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
         handle = await open(expected, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
         const before = await handle.stat();
         if (!before.isFile()) throw new TransferError("bad_request", "preview file is not a regular file");
-        if (before.size > maxPreviewBytes) throw new TransferError("too_large", "preview is too large (1 MiB maximum)");
-        const bytes = Buffer.alloc(maxPreviewBytes + 1);
+        if (before.size > previewLimit) throw new TransferError("too_large", `preview is too large (${kind === "image" ? 10 : 1} MiB maximum)`);
+        const bytes = Buffer.alloc(previewLimit + 1);
         let length = 0;
         while (length < bytes.length) {
           const { bytesRead } = await handle.read(bytes, length, bytes.length - length, length);
           if (!bytesRead) break;
           length += bytesRead;
         }
-        if (length > maxPreviewBytes) throw new TransferError("too_large", "preview is too large (1 MiB maximum)");
+        if (length > previewLimit) throw new TransferError("too_large", `preview is too large (${kind === "image" ? 10 : 1} MiB maximum)`);
         const after = await handle.stat();
         if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || length !== after.size) {
           throw new TransferError("bad_request", "preview file changed while being read");
         }
+        if (kind === "image") return { name: r.name, kind, mimeType, dataBase64: bytes.subarray(0, length).toString("base64") };
         let content: string;
         try {
           content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));

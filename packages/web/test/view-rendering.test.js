@@ -4,7 +4,7 @@ import { Window } from "happy-dom";
 
 const browser = new Window();
 Object.assign(globalThis, {
-  window: browser, document: browser.document, Node: browser.Node,
+  window: browser, document: browser.document, Node: browser.Node, HTMLElement: browser.HTMLElement,
   localStorage: browser.localStorage, MutationObserver: browser.MutationObserver,
   matchMedia: browser.matchMedia.bind(browser), requestAnimationFrame: () => 0,
 });
@@ -52,4 +52,27 @@ test("autoGrow uses measured height and caps it", () => {
   height = 0;
   autoGrow(ta);
   assert.equal(ta.style.height, "auto");
+});
+
+test("quarantine cards provide download, safe text preview and inline deletion confirmation", async () => {
+  const { transferCard } = await import("../public/transfers.js");
+  const { api } = await import("../public/api.js");
+  const t = { tid: "safe-file", ch: "a", direction: "in", peer: "peer", name: "source.txt", size: 10, state: "completed", path: "/quarantine/safe-file/source.txt", createdAt: Date.now(), updatedAt: Date.now() };
+  const root = document.createElement("div"); root.id = "modal-root"; document.body.append(root);
+  const card = transferCard(t); document.body.append(card);
+  const button = label => [...card.querySelectorAll("button")].find(b => b.textContent === label);
+  assert.ok(button("Download")); assert.ok(card.querySelector('[title="Copy path"]'));
+  const original = api.transferPreview;
+  api.transferPreview = async () => ({ name: t.name, kind: "text", content: '<script>unsafe()</script>' });
+  try {
+    button("Preview").click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const code = document.querySelector(".document-preview pre code");
+    assert.equal(code.textContent, '<script>unsafe()</script>'); assert.equal(code.querySelector("script"), null);
+    api.transferPreview = async () => ({ name: "raster.png", kind: "image", mimeType: "image/png", dataBase64: "aGVsbG8=" });
+    button("Preview").click(); await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(document.querySelector(".document-preview img").getAttribute("src"), "data:image/png;base64,aGVsbG8=");
+    button("Delete file").click(); assert.ok(button("Confirm delete file"));
+    assert.equal([...transferCard({ ...t, name: "unsafe.svg" }).querySelectorAll("button")].some(b => b.textContent === "Preview"), false);
+  } finally { api.transferPreview = original; document.querySelectorAll(".modal-backdrop").forEach(el => el.remove()); card.remove(); root.remove(); }
 });

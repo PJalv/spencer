@@ -23,6 +23,7 @@ export interface ApiBackend {
   transfers(): TransferService;
   ownerAttachments: OwnerAttachmentStore;
   state(): unknown;
+  resetP2p?(ch?: string): unknown;
   channelMessages(ch: string, limit: number, before?: string, markRead?: boolean): ChannelMessage[];
   updateChannel(ch: string, patch: Record<string, unknown>): Channel;
   leaveChannel(ch: string): Promise<void>;
@@ -131,18 +132,18 @@ function tokenEq(a: string | undefined, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-async function* boundedUpload(req: IncomingMessage): AsyncGenerator<Uint8Array> {
+async function* boundedUpload(req: IncomingMessage, limit = MAX_UPLOAD_BYTES): AsyncGenerator<Uint8Array> {
   let size = 0;
   let tooLarge = false;
   for await (const chunk of req) {
     size += chunk.byteLength;
-    if (size > MAX_UPLOAD_BYTES) {
+    if (size > limit) {
       tooLarge = true;
       continue; // Drain the request without staging more bytes so the daemon can return a useful 413.
     }
     yield chunk;
   }
-  if (tooLarge) throw new Error("file exceeds the 25 MiB upload limit");
+  if (tooLarge) throw new TransferError("too_large", "file exceeds the upload limit");
 }
 
 function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -376,6 +377,18 @@ export class ApiServer {
         return this.sendJson(res, 401, { error: "missing or invalid X-Spencer-Token" });
       }
       try {
+        const download = /^\/api\/transfers\/([A-Za-z0-9_-]{1,64})\/download$/.exec(url.pathname);
+        if (download && req.method === "GET") {
+          const service = this.b.transfers();
+          if (!service.download) throw new HttpError(404, "downloads unavailable");
+          const file = await service.download(download[1]!);
+          res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._ -]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(file.name)}`, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" });
+          const stream = file.handle.createReadStream();
+          stream.on("error", () => res.destroy());
+          res.on("close", () => stream.destroy());
+          stream.pipe(res);
+          return;
+        }
         const out = await this.route(req.method ?? "GET", url, req);
         if (out === NOT_FOUND) return this.sendJson(res, 404, { error: "not found" });
         return this.sendJson(res, 200, out);
@@ -597,6 +610,17 @@ export class ApiServer {
       return { channel: await b.acceptInvite(body.link) };
     }
 
+    if (p === "/api/p2p/reset" && method === "POST") {
+      const body = await readJson(req);
+      if (body.ch !== undefined && (typeof body.ch !== "string" || !b.core.getChannel(body.ch))) throw new HttpError(400, "ch must be a known channel");
+      if (!b.resetP2p) throw new HttpError(404, "direct links unavailable");
+      return b.resetP2p(body.ch as string | undefined);
+    }
+    if ((m = /^\/api\/transfers\/([A-Za-z0-9_-]{1,64})\/file$/.exec(p)) && method === "DELETE") {
+      const service = b.transfers();
+      if (!service.deleteFile) throw new HttpError(404, "file deletion unavailable");
+      return await service.deleteFile(m[1]!);
+    }
     if (p === "/api/transfers/upload" && method === "POST") {
       const ch = q.get("ch");
       const name = q.get("name");
@@ -610,13 +634,13 @@ export class ApiServer {
         throw new HttpError(415, "content-type must be application/octet-stream");
       }
       const contentLength = req.headers["content-length"];
-      if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_UPLOAD_BYTES)) {
-        throw new HttpError(413, "file exceeds the 25 MiB upload limit");
+      if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > 256 * 1024 * 1024)) {
+        throw new HttpError(413, "file exceeds the 256 MiB upload limit");
       }
       if (this.activeUploads >= MAX_CONCURRENT_UPLOADS) throw new HttpError(429, "too many active uploads; try again shortly");
       this.activeUploads++;
       try {
-        return await b.transfers().requestUpload(ch, { name, uploadId, bytes: boundedUpload(req), ...(to ? { to } : {}) });
+        return await b.transfers().requestUpload(ch, { name, uploadId, bytes: boundedUpload(req, 256 * 1024 * 1024), ...(to ? { to } : {}) });
       } finally {
         this.activeUploads--;
       }

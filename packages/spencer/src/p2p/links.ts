@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { DataChannel, PeerConnection } from "node-datachannel";
 import { openLink, sealLink } from "@spencer/protocol";
@@ -101,7 +101,7 @@ export class LinkManager {
   }
   private attempt() {
     const path = join(this.deps.dataDir, "p2p-attempt");
-    const first = [...this.setups, ...this.links.values()][0];
+    const first = [...this.setups][0];
     if (first)
       writeFileSync(path, JSON.stringify({ ch: first.ch, ts: this.now() }));
     else {
@@ -136,16 +136,33 @@ export class LinkManager {
     try {
       unlinkSync(path);
     } catch {}
-    writeFileSync(disabled, JSON.stringify(Object.fromEntries(this.disabled)));
+    this.persistDisabled();
   }
   isCrashDisabled(ch: string) {
     return (this.disabled.get(ch) ?? 0) > this.now();
+  }
+  private persistDisabled() {
+    const path = join(this.deps.dataDir, "p2p-disabled.json");
+    writeFileSync(path + ".tmp", JSON.stringify(this.crashDisabledChannels()), { mode: 0o600 });
+    renameSync(path + ".tmp", path);
+  }
+  clearCrashDisable(ch?: string) {
+    if (ch) this.disabled.delete(ch); else this.disabled.clear();
+    this.persistDisabled();
+  }
+  crashDisabledUntil(ch: string): number | undefined {
+    const until = this.disabled.get(ch);
+    return until && until > this.now() ? until : undefined;
+  }
+  crashDisabledChannels(): Record<string, number> {
+    return Object.fromEntries([...this.disabled].filter(([, until]) => until > this.now()));
   }
   status() {
     return {
       available: this.addon.ok,
       ...(this.addon.ok ? {} : { error: this.addon.error }),
       active: this.links.size,
+      crashDisabled: this.crashDisabledChannels(),
     };
   }
   stop() {
