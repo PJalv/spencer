@@ -46,6 +46,29 @@ export function bioView(main) {
     ),
   );
 
+  const brief = h("div");
+  const title = h("input.input", { placeholder: "Title", "aria-label": "Work title", maxlength: "160" });
+  const summary = h("textarea.input", { placeholder: "Current status", "aria-label": "Work summary", maxlength: "1000" });
+  const visibility = h("select.input", { "aria-label": "Visibility" }, ...["private", "trusted", "public"].map(v => h("option", { value: v }, v)));
+  const add = h("button.btn.primary", { type: "button" }, "Add work item");
+  main.querySelector(".page-body").append(h("h2", null, "Work Brief"), h("p", null, "Private stays with you; trusted is shared with full-trust channels; public is shared with all work channels."), title, summary, visibility, add, brief);
+  const refreshBrief = async () => {
+    const data = await attempt(() => api.workBrief());
+    if (!data) return;
+    brief.replaceChildren(...data.items.map(item => {
+      const select = h("select.input", { "aria-label": `Visibility for ${item.title}` }, ...["private", "trusted", "public"].map(v => h("option", { value: v }, v)));
+      select.value = item.visibility;
+      select.addEventListener("change", async () => { await attempt(() => api.patchWorkBrief(item.id, { visibility: select.value })); void refreshBrief(); });
+      const done = h("button.btn", { type: "button" }, item.status === "done" ? "Mark active" : "Mark done");
+      done.addEventListener("click", async () => { await attempt(() => api.patchWorkBrief(item.id, { status: item.status === "done" ? "active" : "done" })); void refreshBrief(); });
+      const del = h("button.btn", { type: "button" }, "Delete");
+      del.addEventListener("click", async () => { await attempt(() => api.deleteWorkBrief(item.id)); void refreshBrief(); });
+      return h("div", null, h("h3", null, item.title), h("p", null, item.summary), h("span", null, item.status), select, done, del);
+    }));
+  };
+  add.addEventListener("click", async () => { const result = await attempt(() => api.addWorkBrief({ title: title.value, summary: summary.value, visibility: visibility.value, source: "owner" })); if (result) { title.value = ""; summary.value = ""; void refreshBrief(); } });
+  void refreshBrief();
+  const offBrief = on("work_brief", () => void refreshBrief());
   const channels = h("ul.bio-channels");
   main.querySelector(".page-body").append(h("h2", null, "Shared with"), channels);
   let saved = "";
@@ -106,5 +129,5 @@ export function bioView(main) {
   sync();
   attempt(() => api.bio()).then((r) => r && load(r));
   const off = on("bio", r => { if (editor.value.trim() === saved) load(r); else showChannels(r); });
-  return { destroy() { off(); } };
+  return { destroy() { off(); offBrief(); } };
 }

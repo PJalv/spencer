@@ -492,6 +492,32 @@ export class ApiServer {
       return await agent.decideRequest(m[1]!, m[2] === "approve");
     }
 
+    if (p === "/api/work-brief" || p === "/api/work-brief/publish") {
+      const store = b.core.workBrief;
+      if (!store) throw new HttpError(404, "work brief unavailable");
+      if (method === "GET" && p === "/api/work-brief") return { items: store.list({ visibility: q.get("visibility") || undefined, status: q.get("status") || undefined, project: q.get("project") || undefined }) };
+      if (method === "POST") {
+        const body = await readJson(req);
+        for (const k of ["notifyOwner", "wakeOwner", "final"]) if (body[k] !== undefined && typeof body[k] !== "boolean") throw new HttpError(400, `${k} must be boolean`);
+        if (body.notifyChannel !== undefined && (typeof body.notifyChannel !== "string" || !b.core.getChannel(body.notifyChannel))) throw new HttpError(400, "notifyChannel must be a known channel id");
+        const ch = typeof body.notifyChannel === "string" ? b.core.getChannel(body.notifyChannel) : undefined;
+        const visibility = body.visibility ?? (typeof body.key === "string" ? store.list().find(i => i.key === body.key)?.visibility : undefined) ?? "private";
+        if (ch && (ch.mode === "conversation" || visibility === "private" || (visibility === "trusted" && ch.trust !== "full"))) throw new HttpError(403, "item visibility does not permit this channel");
+        const item = store.upsert(body);
+        if (body.source === "owner") await b.agent().bioChanged?.();
+        const text = `${item.title}: ${item.summary}`;
+        if (body.wakeOwner) await b.agent().ownerSend(text);
+        else if (body.notifyOwner) await b.agent().ownerNote(text);
+        if (ch) b.core.sendChat(ch.id, { text, hop: 0, by: "human", origin: "human", final: body.final === true });
+        return item;
+      }
+    }
+    if ((m = /^\/api\/work-brief\/([0-9a-f-]+)$/.exec(p))) {
+      const store = b.core.workBrief;
+      if (!store) throw new HttpError(404, "work brief unavailable");
+      if (method === "PATCH") { const item = store.upsert(await readJson(req), m[1]); await b.agent().bioChanged?.(); return item; }
+      if (method === "DELETE") { store.delete(m[1]!); await b.agent().bioChanged?.(); return {}; }
+    }
     if (p === "/api/bio") {
       if (method === "GET") return b.core.bio();
       if (method === "PUT") return b.core.setBio((await readJson(req)).text);

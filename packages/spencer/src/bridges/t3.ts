@@ -1,7 +1,7 @@
 /**
  * `spencer mcp t3`: a stdio MCP server that gives Spencer T3 Code's threads (list, start, send, read) through the
  * `t3` CLI, which talks to the running T3 Code server. The binary is found per call (`T3_BIN`, `PATH`, then the
- * newest `~/.t3/runtime/versions/<v>/t3`), so T3 updates need no reconfiguration.
+ * `~/.t3/bin/t3`, then the newest `~/.t3/runtime/versions/<v>/t3`), so T3 updates need no reconfiguration.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -24,6 +24,8 @@ export function findT3(env: NodeJS.ProcessEnv = process.env, home = homedir()): 
   for (const dir of (env.PATH ?? "").split(delimiter)) {
     if (dir && isFile(join(dir, exe))) return join(dir, exe);
   }
+  const installed = join(home, ".t3", "bin", exe);
+  if (isFile(installed)) return installed;
   const root = join(home, ".t3", "runtime", "versions");
   let versions: string[] = [];
   try {
@@ -147,6 +149,8 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
           branch: { type: "string", description: "Branch name for the new worktree." },
           provider: { type: "string", description: "Provider instance id (with model). Default: the project's." },
           model: { type: "string", description: "Model slug. Default: the project's default model." },
+          options: { type: "array", items: { type: "string" }, description: "Provider options as id=value pairs." },
+          generate_title: { type: "boolean", description: "Generate a title for the thread." },
           wait_seconds: waitProp,
         },
         required: ["message"],
@@ -157,6 +161,12 @@ export function t3Tools(defaultProject: string): BridgeTool[] {
           const v = str(a, k);
           if (v) args.push(`--${k}`, v);
         }
+        if (a.options !== undefined) {
+          if (!Array.isArray(a.options) || !a.options.every((option) => typeof option === "string")) throw new ToolError("options must be an array of strings");
+          for (const option of a.options) args.push("--option", option);
+        }
+        if (a.generate_title !== undefined && typeof a.generate_title !== "boolean") throw new ToolError("generate_title must be a boolean");
+        if (a.generate_title) args.push("--generate-title");
         args.push(str(a, "project") ?? defaultProject, "-");
         const deadline = Date.now() + CALL_BUDGET_MS;
         // Check every argument before the thread exists, so a bad one can't lose its id.

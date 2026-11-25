@@ -20,6 +20,9 @@ test("findT3: T3_BIN, then PATH, then the newest ~/.t3 runtime version", () => {
     mkdirSync(join(home, ".t3/runtime/versions/0.1.11"));
     writeFileSync(join(home, ".t3/runtime/versions/0.1.11/t3"), "");
     assert.equal(findT3({ PATH: "" }, home), join(home, ".t3/runtime/versions/0.1.10/t3"), "numeric order; a version without t3 or still installing is skipped");
+    mkdirSync(join(home, ".t3/bin"), { recursive: true });
+    writeFileSync(join(home, ".t3/bin/t3"), "");
+    assert.equal(findT3({ PATH: "" }, home), join(home, ".t3/bin/t3"));
     mkdirSync(join(home, "bin"));
     writeFileSync(join(home, "bin/t3"), "");
     assert.equal(findT3({ PATH: join(home, "bin") }, home), join(home, "bin/t3"));
@@ -50,6 +53,8 @@ test("spencer mcp t3: tools run the t3 CLI (message on stdin) and report its err
     assert.match(started.text, /args: thread start --json --title Fix \. -/);
     assert.match(started.text, /stdin: fix the 'bug'\nplease/);
     assert.match(started.text, /runs in the background/);
+    const options = await mgr.call("t3code", "thread_start", { message: "x", options: ["effort=high", "mode=auto"], generate_title: true });
+    assert.match(options.text, /--option effort=high --option mode=auto --generate-title/);
     assert.match((await mgr.call("t3code", "thread_send", { thread: "t1", message: "go" })).text, /^Sent to thread t1\./);
     assert.deepEqual(await mgr.call("t3code", "thread_show", { thread: "bad" }), { text: "thread bad not found", isError: true });
     assert.deepEqual(await mgr.call("t3code", "thread_send", { thread: "t1" }), { text: "message is required", isError: true });
@@ -136,4 +141,27 @@ test("selfCommand uses the stable executable override", async () => {
     if (previous === undefined) delete process.env.SPENCER_BIN;
     else process.env.SPENCER_BIN = previous;
   }
+});
+
+
+test("liaison tools call the corresponding local API", async () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "daemon.json"), JSON.stringify({port: 7999}));
+  writeFileSync(join(dir, "api-token"), "tok");
+  const calls: string[] = [];
+  const fake = (async (url: string, init: RequestInit) => {
+    const u = new URL(url); calls.push(`${init.method} ${u.pathname}${u.search}`);
+    if (u.pathname === "/api/state") return new Response(JSON.stringify({me:{name:"a"},channels:[{id:"c1",name:"Team",members:[]}]}));
+    return new Response(JSON.stringify({ ok: true }));
+  }) as typeof fetch;
+  try {
+    const tools = Object.fromEntries(spencerTools(dir, fake).map(t => [t.name,t]));
+    await tools.spencer_publish_update!.run({title:"x",summary:"y"});
+    await tools.spencer_work_brief!.run({status:"active"});
+    await tools.spencer_read_peer!.run({id:"p"});
+    await tools.spencer_add_memoir_note!.run({id:"p",text:"note"});
+    await tools.spencer_send_file!.run({channel:"Team",path:"/tmp/file"});
+    await tools.spencer_list_transfers!.run({channel:"Team"});
+    assert.deepEqual(calls.filter(c => !c.includes("/api/state")), ["POST /api/work-brief", "GET /api/work-brief?status=active", "GET /api/peers/p/memoir", "POST /api/peers/p/notes", "POST /api/transfers", "GET /api/transfers?ch=c1"]);
+  } finally { rmSync(dir, {recursive:true,force:true}); }
 });

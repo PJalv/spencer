@@ -1,4 +1,5 @@
 import { Memoir } from "./memoir.ts";
+import { WorkBriefStore } from "./work-brief.ts";
 import { readBio, writeBio } from "./bio.ts";
 import { MAX_ABOUT } from "@spencer/protocol";
 import { LinkManager, createTransferP2pAdapter, type LinkManagerTuning } from "./p2p/index.ts";
@@ -396,6 +397,7 @@ export class Daemon {
     if (s.outbox) await step("outbox", () => s.outbox!.stop());
     if (s.inbox) await step("inbox", () => s.inbox!.stop());
     s.core?.memoir.stop();
+    s.core?.workBrief?.stop();
     s.channels?.stop();
     if (s.agent) await step("agent", () => s.agent!.stop());
     if (s.transfers) await step("transfers", () => s.transfers!.stop());
@@ -558,8 +560,16 @@ export class Daemon {
     const memoir = new Memoir({ db: this.need("db"), dataDir: this.dataDir, peers: () => channels.listPeerDirectory(),
       channels: () => channels.list(), events: this.events,
       refresh: ch => { void this.s.agent?.channelChanged(ch).catch(e => log(`memoir refresh: ${e.message}`)); } });
+    let briefTimer: ReturnType<typeof setTimeout> | undefined;
+    const workBrief = new WorkBriefStore(this.need("db"), (immediate) => {
+      this.events.emit({ type: "work_brief" });
+      if (briefTimer) clearTimeout(briefTimer);
+      const refresh = () => { void this.s.agent?.bioChanged?.().catch(e => log(`work brief refresh: ${e.message}`)); };
+      if (immediate) refresh();
+      else { briefTimer = setTimeout(refresh, 15000); briefTimer.unref(); }
+    });
     return {
-      memoir,
+      memoir, workBrief,
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),
