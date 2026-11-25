@@ -82,6 +82,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE channels ADD COLUMN share_bio INTEGER NOT NULL DEFAULT 1;
    ALTER TABLE channels ADD COLUMN last_hello_about TEXT;
    ALTER TABLE members ADD COLUMN about_at INTEGER;`,
+  // 7: the name sent in our last hello, so a rename re-greets the channel
+  `ALTER TABLE channels ADD COLUMN last_hello_name TEXT NOT NULL DEFAULT ''`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

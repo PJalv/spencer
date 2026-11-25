@@ -43,6 +43,7 @@ export interface ChannelRow {
   last_hello_features: string;
   share_bio: number;
   last_hello_about: string | null;
+  last_hello_name: string;
   direct_link: string;
   allow_local_addresses: number;
   heated: number;
@@ -402,7 +403,7 @@ export class ChannelManager {
     }
   }
 
-  /** Enqueue a hello when the present member set has an id not in last_hello_members. */
+  /** Enqueue a hello when a present member was not greeted yet, or our features, bio or name changed since the last one. */
   private maybeHello(ch: string): void {
     const r = this.row(ch);
     if (!r) return;
@@ -418,7 +419,8 @@ export class ChannelManager {
     const prevAboutHash = r.last_hello_about ?? createHash("sha256").update("").digest("hex");
     const feats = hello.features ?? [];
     const featsJson = JSON.stringify(feats);
-    if (!newcomer && !(present.length > 0 && (featsJson !== r.last_hello_features || aboutHash !== prevAboutHash))) {
+    const changed = present.length > 0 && (featsJson !== r.last_hello_features || aboutHash !== prevAboutHash || hello.name !== r.last_hello_name);
+    if (!newcomer && !changed) {
       if (next !== r.last_hello_members && present.length < greeted.size) {
         // Someone left: shrink the set so a rejoin gets a fresh hello.
         this.d.sql.run("UPDATE channels SET last_hello_members = ? WHERE id = ?", next, ch);
@@ -426,7 +428,10 @@ export class ChannelManager {
       return;
     }
     this.d.outbox().enqueue(ch, hello, newcomer ? {} : { origin: "feature-hello" });
-    this.d.sql.run("UPDATE channels SET last_hello_members = ?, last_hello_features = ?, last_hello_about = ? WHERE id = ?", next, featsJson, aboutHash, ch);
+    this.d.sql.run(
+      "UPDATE channels SET last_hello_members = ?, last_hello_features = ?, last_hello_about = ?, last_hello_name = ? WHERE id = ?",
+      next, featsJson, aboutHash, hello.name, ch,
+    );
   }
 
   buildHello(ch: string): HelloBody {

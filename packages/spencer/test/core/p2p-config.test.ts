@@ -19,10 +19,11 @@ test("migrates a v2 database without losing channel or member data", () => {
     old.close();
     const db = openDb(dir);
     try {
-      assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 6);
+      assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 7);
       const channel = db.prepare("SELECT * FROM channels WHERE id = 'ch'").get()!;
       assert.equal(channel.meta_name, "name");
       assert.equal(channel.last_hello_features, "[]");
+      assert.equal(channel.last_hello_name, "");
       assert.equal(channel.direct_link, "auto");
       assert.equal(channel.allow_local_addresses, 0);
       assert.equal(channel.mode, "chat");

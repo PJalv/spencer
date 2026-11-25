@@ -123,6 +123,15 @@ test("two daemons: invite, hellos, chat both ways, restart routing, catch-up", a
     B.agent().onChat = () => ({ note: "hop cap" });
     const m5 = A.daemon.sendHuman(ch, "noted");
     await waitFor(() => msgs(B, ch).find((m) => m.id === m5.id)?.note === "hop cap", "note stored");
+
+    // --- rename: B restarts under a new name and re-greets, so A learns it
+    await B.daemon.stop();
+    const B2 = await startNode(dirs[1], relay.url, "Robert");
+    try {
+      await waitFor(() => A.daemon.core.getChannel(ch)?.members.find((m) => !m.me)?.name === "Robert", "A sees the new name");
+    } finally {
+      await B2.daemon.stop();
+    }
   } finally {
     await A.daemon.stop();
     await B.daemon.stop();
