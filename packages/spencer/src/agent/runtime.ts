@@ -157,7 +157,7 @@ export class PiRuntime implements AgentRuntime {
     this.log = opts.log ?? (() => {});
   }
 
-  async open(): Promise<void> {
+  async open(opts: { deferResume?: boolean } = {}): Promise<void> {
     const { db } = this.opts;
     db.exec(`CREATE TABLE IF NOT EXISTS agent_conversations (
       key TEXT PRIMARY KEY,
@@ -197,7 +197,11 @@ export class PiRuntime implements AgentRuntime {
     );
     await this.harness.root(BACKGROUND_CONTEXT);
     // Continue runs (and tool calls) the last process left unfinished.
-    this.harness.resume();
+    if (!opts.deferResume) this.resume();
+  }
+
+  resume(): void {
+    this.h().resume();
   }
 
   async close(): Promise<void> {

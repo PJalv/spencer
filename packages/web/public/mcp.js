@@ -194,7 +194,7 @@ export function mcpView(main) {
   const describe = (c) => (c ? ("url" in c ? c.url : [c.command, ...(c.args ?? [])].map(quote).join(" ")) : "");
 
   const render = () => {
-    const missing = presets.filter((p) => config[p.name] === undefined || (p.name === "t3code" && (config[p.name].url || config[p.name].command !== p.config.command || JSON.stringify(config[p.name].args ?? []) !== JSON.stringify(p.config.args ?? []))));
+    const missing = presets.filter((p) => config[p.name] === undefined || (p.name === "t3code" && (!config[p.name].url && (config[p.name].command !== p.config.command || JSON.stringify(config[p.name].args ?? []) !== JSON.stringify(p.config.args ?? [])))));
     presetsBox.replaceChildren(
       ...missing.map((p) =>
         h(
@@ -245,6 +245,7 @@ export function mcpView(main) {
             h(`span.dot.${s.status}`, { "aria-hidden": "true" }),
             h("h2", null, s.name),
             h("span.pill.muted", null, s.transport),
+            s.events ? h(`span.pill.${s.events.status === "supported" ? "ok" : s.events.status === "revoked" ? "bad" : s.events.status === "error" ? "attn" : "muted"}`, { title: s.events.error ?? "MCP Events" }, s.events.status === "supported" ? `events: ${s.events.eventCount ?? 0}` : s.events.status === "revoked" ? "events: revoked" : s.events.status === "error" ? "events: error" : "events: off") : null,
             h(`span.mcp-status.${s.status}`, null, STATUS_TEXT[s.status] ?? s.status),
             h("span.mcp-count", null, toolCount(s.tools ?? [])),
           ),

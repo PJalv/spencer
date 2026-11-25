@@ -229,11 +229,23 @@ export interface Followup {
   depth: number;
   createdAt: number;
   firedAt?: number;
-  firedBy?: "time" | "reply";
+  firedBy?: "time" | "reply" | "event";
+  eventSubscriptions?: { id: string; server: string; event: string; state: "active" | "revoked" | "ended"; error?: string }[];
+  error?: string;
+}
+
+export interface McpServerEventsStatus {
+  status: "supported" | "unsupported" | "revoked" | "error" | "unknown";
+  protocolVersion?: string;
+  serverIdentity?: string;
+  legacyFallback?: boolean;
+  eventCount?: number;
+  events?: { name: string; description?: string; delivery: ("push" | "poll" | "webhook")[] }[];
   error?: string;
 }
 
 export interface McpServerStatus {
+  events?: McpServerEventsStatus;
   name: string;
   transport: "stdio" | "http";
   status: "connected" | "error" | "disabled" | "connecting";
