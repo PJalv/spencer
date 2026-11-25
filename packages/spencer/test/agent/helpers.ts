@@ -117,6 +117,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
       core.messages.push({ id, ch, from: ME.id, mine: true, ts: Date.now(), type: "chat", text: msg.text, hop: msg.hop, by: msg.by, status: "pending", ...(msg.convo ? { convo: msg.convo } : {}) });
       return { id };
     },
+    sendTyping() {},
     sendStatus(ch, s) {
       core.statuses.push({ ch, ...s });
     },

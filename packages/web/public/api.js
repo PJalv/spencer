@@ -42,6 +42,7 @@ async function request(method, path, body) {
 const enc = encodeURIComponent;
 
 export const api = {
+  typing: (ch, active) => { void request("POST", `/api/channels/${ch}/typing`, { active }).catch(() => {}); },
   workBrief: () => request("GET", "/api/work-brief"),
   addWorkBrief: item => request("POST", "/api/work-brief", item),
   patchWorkBrief: (id, patch) => request("PATCH", `/api/work-brief/${enc(id)}`, patch),

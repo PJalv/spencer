@@ -890,6 +890,11 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
         return st;
       }
     }
+    if (c === "typing" && method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.active !== "boolean") throw new HttpError(400, "active must be a boolean");
+      return {};
+    }
     if (c === "messages") {
       if (method === "GET") {
         const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") ?? 100)));

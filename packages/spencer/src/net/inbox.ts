@@ -19,6 +19,8 @@ export interface InboxDeps {
   channelInfo(ch: string): ChannelKeyInfo | undefined;
   /** Hand a stored message to hello/chat/transfer handling. Must be idempotent. */
   route(msg: StoredMessage, body: Body): Promise<void>;
+  /** Typing delivered on a durable relay path is handled without storing a message. */
+  typing?(ch: string, from: string, active: boolean, ts: number): void;
   /** After routed=1 was set (emit UI events). */
   routed(msg: StoredMessage, body: Body): void;
   /** Cumulative ack to the relay (best effort). */
@@ -96,6 +98,12 @@ export class Inbox {
       log(`inbox ${ch}: dropped ${env.id} from ${env.from} at seq ${seq}: ${(e as Error).message}`);
       advance();
       this.d.ack(relayUrl, ch, seq);
+      return;
+    }
+    if (body.type === "typing") {
+      advance();
+      this.d.ack(relayUrl, ch, seq);
+      this.d.typing?.(ch, env.from, body.active, env.ts);
       return;
     }
     const now = Date.now();

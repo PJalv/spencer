@@ -241,6 +241,7 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "typing"; ch: string; from: string; active: boolean; ts: number }
   | { type: "work_brief" }
   | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
@@ -438,6 +439,7 @@ export interface CoreServices {
   ): { id: string };
   requestFileSend(ch: string, req: TransferRequest): Promise<Transfer>;
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
+  sendTyping(ch: string, active: boolean): void;
   sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
   createInvite(kind: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;
