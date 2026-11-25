@@ -251,13 +251,9 @@ describe("two Spencers (integration)", { skip: haveCroc ? false : `croc missing 
     const path = join(src, name);
     writeFileSync(path, data);
     const tr = await from.api.sendFile(ch, path);
-    assert.equal(tr.state, "awaiting_approval");
+    assert.equal(tr.state, "offered");
     assert.equal(tr.initiatedBy, "owner");
     assert.equal(tr.sha256, sha(data));
-    // Nothing reaches the peer before approval.
-    await sleep(300);
-    assert.equal((await to.api.transfers()).some((x) => x.tid === tr.tid), false);
-    assert.equal((await from.api.transferAction(tr.tid, "approve")).state, "offered");
     const done = (x: Transfer | undefined) => x?.state === "completed";
     const fail = (x: Transfer | undefined) => x && ["failed", "cancelled", "expired", "declined"].includes(x.state);
     await waitFor(
@@ -279,7 +275,7 @@ describe("two Spencers (integration)", { skip: haveCroc ? false : `croc missing 
     assert.equal((await from.api.transfer(tr.tid)).progress, 1);
   }
 
-  it("file A → B: awaiting_approval → approve → auto-accept → completed, sha256 matches", async () => {
+  it("file A → B: owner send skips approval → auto-accept → completed, sha256 matches", async () => {
     await sendFile(A, B, 2 * 1024 * 1024 + 3, "report.bin");
   });
 

@@ -1,3 +1,4 @@
+import type { ToolPolicyStore } from "./agent/tool-policy.ts";
 import type { Memoir } from "./memoir.ts";
 import type { WorkBriefStore } from "./work-brief.ts";
 /**
@@ -246,6 +247,7 @@ export interface McpServerStatus {
 export type DaemonEvent =
   | { type: "typing"; ch: string; from: string; active: boolean; ts: number }
   | { type: "work_brief" }
+  | { type: "tool_policies"; scopeKind: "global" | "peer" | "channel"; scopeId: string }
   | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
   | { type: "peer_bio"; ch: string; id: string; about: string | null; aboutAt: number | null }
@@ -401,6 +403,7 @@ export interface OutgoingChat {
 /** What the agent layer needs from the core. */
 export interface CoreServices {
   workBrief?: WorkBriefStore;
+  toolPolicies: ToolPolicyStore;
   memoir: Memoir;
   bio(): BioStatus;
   bioText(): string;

@@ -458,8 +458,7 @@ export class Memoir {
           c.mode !== "conversation" &&
           (s.kind === "channel"
             ? c.id === s.id
-            : c.kind === "direct" &&
-              c.members.some((m) => !m.me && m.id === s.id))
+            : c.members.some((m) => !m.me && m.id === s.id))
         )
           this.d.refresh(c.id);
     };

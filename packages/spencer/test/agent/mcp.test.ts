@@ -5,7 +5,7 @@ import { McpManager, mcpToolName } from "../../src/agent/mcp.ts";
 import { SpencerAgent } from "../../src/agent/agent.ts";
 import type { FakeRequestInfo } from "../../src/agent/fake-brain.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
-import { CHANNEL_TOOLS, channel, makeCore, peerChat, waitFor } from "./helpers.ts";
+import { CHANNEL_TOOLS, ME, channel, makeCore, peerChat, waitFor } from "./helpers.ts";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/echo-mcp-server.ts", import.meta.url));
 const ECHO = { command: process.execPath, args: [FIXTURE] };
@@ -239,4 +239,94 @@ test("HTTP connection errors report status and redact credentials", async () => 
     await mgr.stop();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('Full Trust policies gate real MCP calls, apply peer locks in groups, and leave owner unrestricted', async () => {
+  const core = makeCore({channels:[channel('guarded','group','Guarded',{trust:'full'}), channel('unrelated','direct','Unrelated',{trust:'full'})], config:{mcpServers:{echo:ECHO}}});
+  const peer = core.getChannel('guarded')!.members.find(m=>!m.me)!;
+  const requests: FakeRequestInfo[]=[];
+  const agent = new SpencerAgent(core,{fakeHooks:{onRequest:r=>requests.push(r)},log(){}});
+  try {
+    await agent.start(); await agent.mcpSettled();
+    core.toolPolicies.replace({scopeKind:'channel',scopeId:'guarded'},[
+      {toolPattern:'*pid',effect:'deny'}, {toolPattern:'*fail',effect:'ask_owner'},
+      {toolPattern:'*echo',effect:'allow',argDefaults:{text:'injected'},argLocks:{provider:'codex','modelSelection.model':'chosen'},argAllowValues:{projectId:['spencer']}}
+    ]);
+    core.toolPolicies.replace({scopeKind:'peer',scopeId:peer.id},[{toolPattern:'*echo',effect:'allow',argLocks:{model:'peer-model'}}]);
+    await agent.channelChanged('guarded');
+    const offered=await agent.agentRuntime!.offeredTools('ch:guarded');
+    assert.ok(!offered.includes('mcp__echo__pid')); assert.ok(offered.includes('mcp__echo__echo'));
+    const call=async(tool:string,args:unknown)=>{await agent.onPeerChat(peerChat(core.getChannel('guarded')!,`please call mcp__echo__${tool} ${JSON.stringify(args)}`, {mentions:[ME.id]})); await agent.idle(); return core.sent.at(-1)!.text;};
+    assert.match(await call('fail',{}),/Policy violation:.*ask_owner/);
+    assert.match(await call('echo',{projectId:'spencer'}),/echo: injected/);
+    assert.match(await call('echo',{projectId:'other'}),/Policy violation:.*projectId/);
+    assert.match(await call('echo',{projectId:'spencer',model:'wrong'}),/Policy violation:.*model/);
+    assert.match(await call('echo',{projectId:'spencer',provider:'wrong'}),/Policy violation:.*provider/);
+    assert.ok(requests.some(r=>r.systemPrompt.includes('modelSelection.model')&&r.systemPrompt.includes('peer-model')));
+    await agent.ownerSend('/tool mcp__echo__pid {}'); await agent.idle();
+    assert.match((await agent.ownerTranscript(1))[0].text,/done: \d+/);
+  } finally {await agent.stop(); core.cleanup();}
+});
+
+test('DM peer denies hide tools and cannot be bypassed without an active asker; owner zero-arg calls work', async () => {
+  const core = makeCore({channels:[channel('dm-policy','direct','Bob',{trust:'full'})],config:{mcpServers:{echo:ECHO}}});
+  const dm = core.getChannel('dm-policy')!;
+  core.toolPolicies.replace({scopeKind:'peer',scopeId:dm.members.find(m=>!m.me)!.id},[{toolPattern:'*pid',effect:'deny'}]);
+  const agent=new SpencerAgent(core,{log(){}});
+  try {
+    await agent.start();await agent.mcpSettled();
+    assert.ok(!(await agent.agentRuntime!.offeredTools('ch:dm-policy')).includes('mcp__echo__pid'));
+    // Exercise the execution boundary with no pending replies (e.g. a stale tool registration).
+    const tools: import('../../src/agent/runtime.ts').ToolSpec[] = Reflect.apply(Reflect.get(agent,'mcpTools'),agent,[]);
+    const pid=tools.find(t=>t.name==='mcp__echo__pid')!;
+    assert.match(JSON.stringify(await pid.execute(undefined,{conversationKey:'ch:dm-policy',callId:'no-asker'})),/Policy violation:.*denied/);
+    const owner=await pid.execute(undefined,{conversationKey:'owner',callId:'owner-zero-args'});
+    assert.match(typeof owner==='string'?owner:owner.text,/^\d+$/);
+  } finally {await agent.stop();core.cleanup();}
+});
+
+test('an uncompilable third-party schema warns without breaking configuration or policy enforcement', async () => {
+  const core=makeCore({channels:[channel('bad-schema','direct','Bob',{trust:'full'})],config:{mcpServers:{echo:{...ECHO,args:[...ECHO.args,'--bad-schema']}}}});
+  const logs:string[]=[];const agent=new SpencerAgent(core,{log:message=>logs.push(message)});
+  try {
+    await agent.start();await agent.mcpSettled();
+    assert.ok(logs.some(s=>s.includes('cannot locally validate MCP tool mcp__echo__big')));
+    assert.ok(!logs.some(s=>s.includes('configure failed')));
+    await agent.ownerSend('/tool mcp__echo__echo {"text":"still works"}');await agent.idle();
+    assert.match((await agent.ownerTranscript(1))[0].text,/echo: still works/);
+    const tools: import('../../src/agent/runtime.ts').ToolSpec[] = Reflect.apply(Reflect.get(agent,'mcpTools'),agent,[]);
+    const big=tools.find(t=>t.name==='mcp__echo__big')!;
+    const output=await big.execute(undefined,{conversationKey:'owner',callId:'uncompilable'});
+    assert.ok(typeof output==='string'||!output.isError);
+    core.toolPolicies.replace({scopeKind:'channel',scopeId:'bad-schema'},[{toolPattern:'*big',effect:'ask_owner'}]);
+    assert.match(JSON.stringify(await big.execute(undefined,{conversationKey:'ch:bad-schema',callId:'uncompilable-gated'})),/Policy violation:.*ask_owner/);
+  } finally {await agent.stop();core.cleanup();}
+});
+
+test('guardrail prompts disclose only matching available tools outside Conversations', async () => {
+  const core=makeCore({channels:[
+    channel('hidden','direct','Hidden'),
+    channel('visible','direct','Visible',{allowedMcpTools:['mcp__echo__echo']}),
+    channel('plain','direct','Plain',{allowedMcpTools:['mcp__echo__pid']}),
+    channel('convo-policy','group','Banter',{mode:'conversation',trust:'full'})
+  ],config:{mcpServers:{echo:ECHO}}});
+  core.toolPolicies.replace({scopeKind:'global',scopeId:'*'},[
+    {toolPattern:'*echo__echo',effect:'ask_owner',argLocks:{worktree:'VISIBLE_ONLY'},argDefaults:{},argAllowValues:{},note:'Approval for this visible tool'},
+    {toolPattern:'mcp__private__*',effect:'allow',argLocks:{projectId:'GLOBAL_SECRET'}}
+  ]);
+  core.toolPolicies.replace({scopeKind:'peer',scopeId:core.getChannel('hidden')!.members.find(m=>!m.me)!.id},[{toolPattern:'mcp__private__*',effect:'allow',argLocks:{namespace:'PEER_SECRET'}}]);
+  const requests:FakeRequestInfo[]=[];
+  const agent=new SpencerAgent(core,{fakeHooks:{onRequest:r=>requests.push(r)},log(){}});
+  try {
+    await agent.start();await agent.mcpSettled();
+    for(const id of ['hidden','visible','plain','convo-policy']) {
+      await agent.onPeerChat(peerChat(core.getChannel(id)!,'check scope',{mentions:[ME.id]}));await agent.idle();
+      const prompt=requests.at(-1)!.systemPrompt;
+      assert.doesNotMatch(prompt,/GLOBAL_SECRET|PEER_SECRET/);
+      if(id==='visible') {
+        assert.match(prompt,/Active tool guardrails/);assert.match(prompt,/VISIBLE_ONLY/);
+        assert.match(prompt,/Approval for this visible tool/);assert.doesNotMatch(prompt,/defaults \{\}|allowed \{\}/);
+      } else assert.doesNotMatch(prompt,/Active tool guardrails|VISIBLE_ONLY/);
+    }
+  } finally {await agent.stop();core.cleanup();}
 });

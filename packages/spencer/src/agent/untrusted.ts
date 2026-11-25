@@ -53,3 +53,15 @@ export function wrapUntrustedNote(text: string): string {
     `<untrusted_note>\n${escapeBody(text)}\n</untrusted_note>`
   );
 }
+
+/** Keep scope boundaries near the end of a long peer bio, within a UTF-16 budget. */
+export function clipPeerBio(text: string, limit = 1200): string {
+  if (text.length <= limit) return text;
+  const marker = '… (truncated) …';
+  const budget = limit - marker.length;
+  let head = text.slice(0, Math.ceil(budget / 2));
+  let tail = text.slice(-Math.floor(budget / 2));
+  if (/[\ud800-\udbff]$/.test(head)) head = head.slice(0, -1);
+  if (/^[\udc00-\udfff]/.test(tail)) tail = tail.slice(1);
+  return head + marker + tail;
+}

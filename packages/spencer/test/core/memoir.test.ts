@@ -324,15 +324,15 @@ test("agent refresh is scope-local, leading/trailing throttled, owner writes imm
   try {
     store.recordAgentNote(scope, "first", ch, "standard", peer.id);
     store.recordAgentNote(scope, "second", ch, "standard", peer.id);
-    assert.deepEqual(changes, [ch]);
+    assert.deepEqual(changes, [ch, group]);
     t.mock.timers.tick(119_999);
-    assert.equal(changes.length, 1);
+    assert.equal(changes.length, 2);
     t.mock.timers.tick(1);
-    assert.deepEqual(changes, [ch, ch]);
+    assert.deepEqual(changes, [ch, group, ch, group]);
     store.writeRules(scope, "owner edit");
-    assert.deepEqual(changes, [ch, ch, ch]);
+    assert.deepEqual(changes, [ch, group, ch, group, ch, group]);
     store.addOwnerNote(scope, "owner note");
-    assert.equal(changes.length, 4);
+    assert.equal(changes.length, 8);
     store.recordAgentNote(
       { kind: "channel", id: group },
       "group fact",

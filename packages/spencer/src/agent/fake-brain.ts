@@ -39,6 +39,8 @@ export interface FakeRequestInfo {
   conversation: "owner" | "channel";
   /** Tool names offered to the model in this request. */
   tools: string[];
+  /** Provider-facing schemas, for adapter regression checks. */
+  toolSchemas: { name: string; parameters: object }[];
   systemPrompt: string;
   /** The text the brain is answering (peer text, owner command, or tool result). */
   text: string;
@@ -66,6 +68,7 @@ export function createFakeBrain(opts: { name: () => string; hooks?: FakeBrainHoo
     const info: FakeRequestInfo = {
       conversation: channel ? "channel" : "owner",
       tools,
+      toolSchemas: getCurrentTools(messages).map(t => ({ name: t.name, parameters: t.parameters })),
       systemPrompt,
       text: target ? describe(target) : "",
     };

@@ -731,16 +731,16 @@ The daemon emits `{type: "bio", bio: BioStatus}` after a BIO save or sharing cha
 
 The database stores `channels.share_bio`, `channels.last_hello_about` as a SHA-256 digest, and `members.about_at`. Startup adds missing columns idempotently. BIO changes recheck hellos across channels. Rechecks stagger channels when there are more than 15.
 
-The owner's BIO narrows channel trust rules, including Full Trust. Conversations channels omit that scope restriction. Owner instructions include the published scope. Peer BIO blocks come last in channel instructions, after trust, scope, and Soul. They contain only that channel's member biographies. Every angle bracket in peer text is escaped. Peer self-descriptions never grant permissions or override rules. Direct channels include the complete bio. Groups truncate each biography to 400 UTF-16 code units without splitting surrogate pairs. Incoming BIO changes are stored immediately. Agent refreshes occur at most once per peer per channel every two minutes, with a trailing refresh.
+The owner's BIO narrows channel trust rules, including Full Trust. Conversations channels omit that scope restriction. Owner instructions include the published scope. Peer BIO blocks come last in channel instructions, after trust, scope, and Soul. They contain only that channel's member biographies. Every angle bracket in peer text is escaped. Peer self-descriptions never grant permissions or override rules. Direct channels include the complete bio. Groups preserve the head and tail of each biography within 1200 UTF-16 code units without splitting surrogate pairs. `list_peers` uses the same limit. Incoming BIO changes are stored immediately. Agent refreshes occur at most once per peer per channel every two minutes, with a trailing refresh.
 
 ### Owner rules and structured memoir
 
 Memoir is always available. Spencer exposes no agent tool that writes `RULES.md`;
 only authenticated Owner HTTP/UI calls and direct local filesystem edits write it.
-Peer rules apply only to that peer's direct channels; group rules apply only to that
+Peer rules apply in that peer's direct channels and groups containing that peer; group rules apply only to that
 group chat. Conversations channels omit rules, history, and the `record_memoir_note`
 tool. Like `SOUL.md`, rules narrow the channel policy and remain advisory when Owner
-coding tools or Full Trust filesystem/T3 MCP servers can access `<dataDir>`.
+coding tools or Full Trust filesystem/MCP servers can access `<dataDir>`.
 
 Rules live at `peers/<peerId>/RULES.md` or `channels/<chId>/RULES.md` under the data
 directory. Writes validate identity and membership, cap trimmed UTF-8 text at
@@ -786,6 +786,54 @@ Channel prompts include only their own scope's rules and up to 2000 characters o
 historical notes (pinned first, then newest). Notes are escaped as untrusted data
 at the end of the prompt. A group never receives a member's DM rules or notes.
 Owner prompts never automatically include peer or group history.
+
+### MCP tool guardrails
+
+Owner-authenticated local endpoints:
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| GET / PUT | `/api/tool-policies/global` | `{ rules: ToolPolicy[] }` |
+| GET / PUT | `/api/channels/:ch/tool-policies` | `{ rules: ToolPolicy[] }` |
+| GET / PUT | `/api/peers/:id/tool-policies` | `{ rules: ToolPolicy[] }` |
+
+PUT atomically replaces a scope's rules. Each rule has `id` (optional on
+creation), `scopeKind`, `scopeId`, `toolPattern`, `effect`, optional
+`argDefaults`, `argLocks`, `argAllowValues`, optional `note`, and `updatedAt`.
+The server assigns scope and timestamp from the route and current time.
+`global` uses scope ID `*`. Channel and peer routes require an existing channel
+or peer. Invalid scopes, effects, paths and payloads return HTTP 400. A scope
+accepts at most 100 rules and 64 KiB of rule JSON. Patterns have at most 128
+characters; `*` is the only wildcard. Other characters match literally.
+
+Policies apply only to channel conversations. They never restrict the owner
+conversation. Global, channel and active asker's peer rules combine in DMs
+and groups. The strictest matching effect wins: `deny`, then `ask_owner`, then
+`allow`. An allow rule does not grant a standard channel access to an otherwise
+unavailable tool. Full Trust remains subject to guardrails. Denied tools are
+hidden when known at configuration time and refused at execution; approval-gated
+tools return an error directing the agent to `ask_owner` without executing.
+
+Argument maps use dot paths. Defaults fill undefined values, in global then
+channel then peer order. Locks inject omitted values and reject conflicting
+caller values. Conflicting locks, including overlapping parent/child locks,
+fail closed. Every allowlist must accept the final value, so lists intersect.
+Equality is structural. A missing allowlisted value is an error. Paths and
+nested values cannot contain `__proto__`, `constructor` or `prototype` keys.
+The wrapper validates the resulting arguments against the original MCP schema
+before execution. Policy errors return `{ isError: true, text: "Policy violation: …" }`.
+
+Successful PUT emits `{ type: "tool_policies", scopeKind, scopeId }` and refreshes
+affected channels immediately. Channel Settings and Peer Cards expose a Tool
+guardrails editor with matcher, effect and JSON argument maps. Rules persist in
+the module-owned SQLite `agent_tool_policies` table.
+
+Peer `RULES.md` applies in DMs and in ordinary groups containing that peer.
+Changing peer rules refreshes all those channels. Conversations mode excludes
+memoir rules. Peer bios in group prompts and `list_peers` retain both their head
+and tail within 1200 UTF-16 code units. BIO scope instructions tell agents to
+politely decline clearly out-of-scope requests and end with `[END]`, reserving
+`ask_owner` for in-scope work requiring approval.
 
 ### Work Brief and external agents
 

@@ -211,7 +211,7 @@ describe("crash/restart (child processes, SIGKILL)", { skip: haveCroc ? false : 
     const path = join(src, `${label}.bin`);
     writeFileSync(path, data);
     const tr = await A.api.sendFile(ch, path);
-    await A.api.transferAction(tr.tid, "approve");
+    assert.equal(tr.state, "offered");
     // Mid-transfer: B is receiving and the bytes are flowing.
     await waitFor(
       async () => {

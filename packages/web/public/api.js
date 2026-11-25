@@ -47,6 +47,8 @@ export const api = {
   addWorkBrief: item => request("POST", "/api/work-brief", item),
   patchWorkBrief: (id, patch) => request("PATCH", `/api/work-brief/${enc(id)}`, patch),
   deleteWorkBrief: id => request("DELETE", `/api/work-brief/${enc(id)}`),
+  toolPolicies: (kind, id) => request("GET", policyPath(kind, id)),
+  setToolPolicies: (kind, id, rules) => request("PUT", policyPath(kind, id), { rules }),
   memoir: (kind, id, markSeen = false) => request("GET", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/memoir${markSeen ? "?markSeen=1" : ""}`),
   setRules: (kind, id, text) => request("PUT", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/rules`, { text }),
   addMemoirNote: (kind, id, text, pinned = false) => request("POST", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/notes`, { text, pinned }),
@@ -233,3 +235,5 @@ export function connectEvents({ onEvent, onOpen, onStatus }) {
   };
   connect();
 }
+
+function policyPath(kind, id) { return kind === "global" ? "/api/tool-policies/global" : `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/tool-policies`; }

@@ -1,3 +1,4 @@
+import { ToolPolicyStore } from "./agent/tool-policy.ts";
 import { Memoir } from "./memoir.ts";
 import { WorkBriefStore } from "./work-brief.ts";
 import { readBio, writeBio } from "./bio.ts";
@@ -587,6 +588,7 @@ export class Daemon {
     });
     return {
       memoir, workBrief,
+      toolPolicies: new ToolPolicyStore(this.need("db")),
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),

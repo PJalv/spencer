@@ -1,3 +1,4 @@
+import { clipPeerBio } from "./untrusted.ts";
 /**
  * Spencer's own tools on top of `CoreServices`.
  *
@@ -11,7 +12,7 @@
  *
  * Tools are global by name (see `ToolSpec`): every execute derives its channel from `ctx.conversationKey`.
  */
-import { isB64uId, truncateUtf16 } from "@spencer/protocol";
+import { isB64uId } from "@spencer/protocol";
 import type { Channel, ChannelMember, CoreServices } from "../contracts.ts";
 import { nameHandles } from "../policy.ts";
 import type { ToolSpec, ToolContext } from "./runtime.ts";
@@ -224,7 +225,7 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
             autoReply: c.autoReply,
             members: c.members.map(m => {
               const raw = m.me ? "" : (bios.get(m.id) ?? "");
-              const clipped = raw.length > 400 ? `${truncateUtf16(raw, 400)}…` : raw;
+              const clipped = clipPeerBio(raw);
               return {
                 ...describeMember(m),
                 ...(clipped ? { bio: { untrusted: true, text: escapeBio(clipped) } } : {}),
