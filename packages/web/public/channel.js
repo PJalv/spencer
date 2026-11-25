@@ -1118,6 +1118,7 @@ export function channelView(main, chId) {
       clearInterval(staleTimer);
       draftState.renderers.delete(renderDraftsForView);
       draftState.scrollers.delete(scrollToBottom);
+      comp.destroy();
       discardEmptyChannelDraftState(attachmentDraftsByChannel, chId, draftState);
       offs.forEach((f) => f());
       document.removeEventListener("visibilitychange", onVisible);
