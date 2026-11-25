@@ -135,6 +135,7 @@ type Started = {
 export class Daemon {
   readonly dataDir: string;
   readonly events: EventBus;
+  private typingSent = new Map<string, number>();
   private opts: DaemonOptions;
   private log: (m: string) => void;
   private s: Partial<Started> = {};
@@ -299,6 +300,7 @@ export class Daemon {
       log,
       channelInfo: (ch) => channels.info(ch),
       route: (msg, body) => this.route(msg, body),
+      typing: (ch, from, active, ts) => this.receiveTyping(ch, from, active, ts),
       routed: (msg, body) => {
         if (body.type === "chat" || body.type === "hello") {
           const m = channels.message(msg.id);
@@ -467,6 +469,10 @@ export class Daemon {
       return;
     }
     if (isLinkBody(body)) { if (body.to === this.need("me").id) void this.s.links?.onSignal(ch, env.from, body); return; }
+    if (body.type === "typing") {
+      this.receiveTyping(ch, env.from, body.active, env.ts);
+      return;
+    }
     if (body.type !== "status" || Date.now() - env.ts >= STATUS_MAX_AGE_MS) return;
     this.events.emit({
       type: "status",
@@ -479,6 +485,12 @@ export class Daemon {
     });
   }
 
+  private receiveTyping(ch: string, from: string, active: boolean, ts: number): void {
+    const age = Date.now() - ts;
+    if (age >= 15_000 || age < -5_000) return;
+    this.events.emit({ type: "typing", ch, from, active, ts });
+  }
+
   // ------------------------------------------------------------- routing
 
   private async route(msg: StoredMessage, body: Body): Promise<void> {
@@ -489,6 +501,10 @@ export class Daemon {
         return;
       case "chat":
         await this.routeChat(msg, body);
+        return;
+      case "typing":
+        this.receiveTyping(msg.ch, msg.from_id, body.active, msg.ts);
+        this.need("sql").run("DELETE FROM messages WHERE id = ?", msg.id);
         return;
       case "status":
         // Ephemeral: show it if it is fresh (not a catch-up after being offline), then forget it.
@@ -623,6 +639,19 @@ export class Daemon {
         return { id: res.id };
       },
       requestFileSend: (ch, req) => this.need("transfers").request(ch, req),
+      sendTyping(ch, active) {
+        try {
+          if (!channels.row(ch)) return;
+          const info = channels.info(ch);
+          const conn = info && daemon.s.pool?.peek(info.relayUrl);
+          if (!info || !conn?.ready || !conn.features.includes("ephemeral")) return;
+          const now = Date.now();
+          if (active && now - (daemon.typingSent.get(ch) ?? 0) < 2000) return;
+          if (active) daemon.typingSent.set(ch, now);
+          else daemon.typingSent.delete(ch);
+          conn.request({ t: "send", env: sealEnvelope(daemon.need("me"), ch, info.encKey, { type: "typing", active }), ephemeral: true }).catch(() => {});
+        } catch {}
+      },
       sendStatus(ch, s) {
         try {
           if (!channels.row(ch) || !isB64uId(s.replyTo)) return;

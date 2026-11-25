@@ -19,6 +19,7 @@ export const S = {
   requests: new Map(), // id -> OwnerRequest (ask_owner approvals and "continue?" cards)
   followups: new Map(), // id -> Followup (reminders the agents scheduled on themselves)
   conversations: new Map(), // ch -> ConversationStatus (Conversations channels: my timer and the debate going on)
+  typing: new Map(),
   working: new Map(), // ch -> Map(memberId -> {replyTo, activity, steps, since, ts}): a Spencer is working on a reply
   messages: new Map(), // ch -> ChannelMessage[] (only for channels that were opened)
   owner: null, // OwnerItem[] once loaded
@@ -202,6 +203,7 @@ export function upsertChannel(c) {
 export function removeChannel(ch) {
   S.channels.delete(ch);
   S.messages.delete(ch);
+  S.typing.delete(ch);
   delete S.ack[ch];
   delete S.local[ch];
   saveAck();
@@ -475,4 +477,24 @@ export function applyBioEvent(ev) {
     S.peerBios.get(ev.ch).set(ev.id, ev);
     emit("peer_bio", ev);
   }
+}
+
+export function clearTyping(ch, from) {
+  const entries = S.typing.get(ch);
+  if (!entries?.delete(from)) return;
+  if (!entries.size) S.typing.delete(ch);
+  emit(`typing:${ch}`);
+}
+export function setTyping(ev) {
+  if (!ev.active) return clearTyping(ev.ch, ev.from);
+  if (!S.typing.has(ev.ch)) S.typing.set(ev.ch, new Map());
+  S.typing.get(ev.ch).set(ev.from, { ts: Date.now() });
+  emit(`typing:${ev.ch}`);
+}
+export function typingIn(ch) {
+  const entries = S.typing.get(ch);
+  if (!entries) return [];
+  for (const [id, value] of entries) if (Date.now() - value.ts >= 8000) entries.delete(id);
+  if (!entries.size) S.typing.delete(ch);
+  return [...entries.keys()];
 }

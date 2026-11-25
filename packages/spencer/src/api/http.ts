@@ -537,6 +537,15 @@ export class ApiServer {
     if (p === "/api/peers" && method === "GET") return { peers: b.core.listPeerDirectory() };
     if (p === "/api/channels" && method === "GET") return { items: b.core.listChannels() };
 
+    if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/typing$/.exec(p)) && method === "POST") {
+      const ch = m[1];
+      if (!b.core.getChannel(ch)) throw new HttpError(404, "unknown channel");
+      const body = await readJson(req);
+      if (typeof body.active !== "boolean") throw new HttpError(400, "active must be a boolean");
+      b.core.sendTyping(ch, body.active);
+      return {};
+    }
+
     if ((m = /^\/api\/channels\/([A-Za-z0-9_-]{1,64})\/messages$/.exec(p))) {
       const ch = m[1];
       if (!b.core.getChannel(ch)) throw new HttpError(404, "unknown channel");

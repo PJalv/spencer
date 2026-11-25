@@ -3,6 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { sealEnvelope } from "@spencer/protocol";
+import { loadOrCreateIdentity } from "../../src/store/files.ts";
 import { startRelay } from "../../../relay/src/index.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
 import { freePort, quietLog, relayAt, startNode, tempDir, waitFor, type TestNode } from "./helpers.ts";
@@ -130,4 +133,101 @@ test("an older relay (no presence, no ephemeral): presence is unknown, and statu
     await relay.close();
     t.cleanup();
   }
+});
+
+test("typing uses the ephemeral relay and HTTP validates and throttles", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    const seen: DaemonEvent[] = [];
+    B.daemon.events.subscribe(e => seen.push(e));
+    const post = (channel: string, active: unknown) => fetch(`http://127.0.0.1:${A.daemon.port}/api/channels/${channel}/typing`, {
+      method: "POST", headers: { "X-Spencer-Token": A.daemon.token, "Content-Type": "application/json" }, body: JSON.stringify({ active }),
+    });
+    assert.equal((await post("unknown", true)).status, 404);
+    assert.equal((await post(ch, "yes")).status, 400);
+    assert.equal((await post(ch, true)).status, 200);
+    await waitFor(() => seen.some(e => e.type === "typing" && e.active), "typing received");
+    await post(ch, true);
+    await post(ch, false);
+    await waitFor(() => seen.some(e => e.type === "typing" && !e.active), "typing stopped");
+    assert.equal(seen.filter(e => e.type === "typing" && e.active).length, 1);
+    await post(ch, true);
+    await post(ch, false);
+    await waitFor(() => seen.filter(e => e.type === "typing" && !e.active).length === 2, "second typing stop");
+    assert.deepEqual(seen.filter(e => e.type === "typing").map(e => e.active), [true, false, true, false]);
+    assert.equal(B.daemon.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'typing'").get()!.n, 0);
+    assert.equal(B.agent().peerChats.length, 0);
+  } finally {
+    await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup();
+  }
+});
+
+
+test("typing is never sent to a legacy relay", async () => {
+  const t = tempDir();
+  const dbPath = join(t.dir, "relay.sqlite");
+  const relay = await startRelay({ host: "127.0.0.1", port: 0, dbPath, log: quietLog, features: { presence: false, ephemeral: false } });
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    await B.daemon.stop();
+    const db = new DatabaseSync(dbPath);
+    const before = db.prepare("SELECT count(*) AS n FROM messages").get()!.n;
+    A.daemon.core.sendTyping(ch, true);
+    A.daemon.core.sendTyping(ch, false);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(db.prepare("SELECT count(*) AS n FROM messages").get()!.n, before);
+    db.close();
+  } finally { await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup(); }
+});
+
+
+test("durable typing never inserts a message and still advances and acknowledges the relay sequence", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    B.daemon.db.exec(`
+      CREATE TEMP TABLE typing_inserts (id TEXT);
+      CREATE TEMP TRIGGER record_typing_insert AFTER INSERT ON messages WHEN NEW.type = 'typing'
+      BEGIN INSERT INTO typing_inserts VALUES (NEW.id); END;
+    `);
+    const seen: DaemonEvent[] = [];
+    B.daemon.events.subscribe(e => seen.push(e));
+    const info = A.daemon.channels.info(ch)!;
+    const env = sealEnvelope(loadOrCreateIdentity(A.dir), ch, info.encKey, { type: "typing", active: true });
+    const ack = await A.daemon.pool.get(relay.url).request({ t: "send", env });
+    await waitFor(() => seen.some(e => e.type === "typing"), "durable typing event");
+    assert.equal(B.daemon.db.prepare("SELECT count(*) AS n FROM typing_inserts").get()!.n, 0, "no insert, even transiently");
+    assert.equal(B.daemon.channels.row(ch)!.last_seq, ack.seq);
+    assert.ok(typeof ack.seq === "number");
+    const seq = ack.seq;
+    assert.equal(B.agent().peerChats.length, 0);
+    const relayDb = new DatabaseSync(join(t.dir, "relay.sqlite"));
+    try {
+      await waitFor(() => relayDb.prepare("SELECT count(*) AS n FROM messages WHERE ch = ? AND seq = ?").get(ch, seq)!.n === 0, "typing sequence acknowledged");
+    } finally { relayDb.close(); }
+  } finally { await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup(); }
+});
+
+test("typing rejects stale and future timestamps on ephemeral and durable delivery", async () => {
+  const t = tempDir();
+  const relay = await relayAt(t.dir);
+  const { A, B, ch } = await pair(t, relay.url);
+  try {
+    const seen: DaemonEvent[] = [];
+    B.daemon.events.subscribe(e => seen.push(e));
+    const info = A.daemon.channels.info(ch)!;
+    const me = loadOrCreateIdentity(A.dir);
+    for (const ephemeral of [true, false]) {
+      seen.length = 0;
+      for (const ts of [Date.now() - 15_000, Date.now() + 60_000, Date.now() + 3000]) {
+        await A.daemon.pool.get(relay.url).request({ t: "send", ephemeral, env: sealEnvelope(me, ch, info.encKey, { type: "typing", active: true }, { ts }) });
+      }
+      await A.daemon.pool.get(relay.url).request({ t: "send", ephemeral, env: sealEnvelope(me, ch, info.encKey, { type: "typing", active: false }) });
+      await waitFor(() => seen.some(e => e.type === "typing" && !e.active), "typing barrier");
+      assert.deepEqual(seen.filter(e => e.type === "typing").map(e => e.active), [true, false], `ephemeral=${ephemeral}`);
+    }
+  } finally { await A.daemon.stop(); await B.daemon.stop(); await relay.close(); t.cleanup(); }
 });

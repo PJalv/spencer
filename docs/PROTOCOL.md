@@ -97,6 +97,7 @@ type Body =
   | { type: "file_cancel"; tid: string; to: string; reason: string }
   | { type: "link_offer" | "link_answer"; to: string; sid: string; sealed: string }
   | { type: "link_close"; to: string; sid: string; reason?: string }
+  | { type: "typing"; active: boolean }
   | { type: "status"; replyTo: string;                                  // activity ≤ 200 chars
       state: "working" | "done" | "input_required" | "completed" | "failed"; activity?: string };
 ```
@@ -202,7 +203,7 @@ The relay already knows which identities have an authenticated connection; it sh
 `{t:"send", rid, env, ephemeral: true}` gets the same checks as a normal send (membership, `from`, signature,
 size, rate limit) but the relay does not store it, assigns no `seq`, keeps no dedupe record, and replies
 `ok {id}`. It pushes `{t:"eph", ch, env}` once to the other members' *subscribed* connections; members who are
-offline never get it. Spencers send `status` and `link_*` bodies this way and accept those bodies from `eph` frames
+offline never get it. Typing is sent only to relays advertising `ephemeral`, expires after 15 seconds, and never wakes an agent. Spencers send `status`, `typing`, and `link_*` bodies this way and accept those bodies from `eph` frames
 (after the same relay, envelope, signature and membership checks as the inbox; nothing is stored or acked).
 Backward compatible both ways: an older relay ignores the `ephemeral` flag and stores the message (receivers drop a
 stale status), and an older Spencer ignores the unknown `eph` frame (it just doesn't see live status).
@@ -527,6 +528,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=&markRead=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read unless `markRead=false`; this is used for passive timeline reconciliation. |
+| POST | `/api/channels/:ch/typing` | `{active: boolean}` → `{}`; best-effort ephemeral human typing indicator. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
 | PATCH | `/api/channels/:ch` | `{name?, autoReply?, shareBio?: boolean, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |

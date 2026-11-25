@@ -42,6 +42,7 @@ async function request(method, path, body) {
 const enc = encodeURIComponent;
 
 export const api = {
+  typing: (ch, active) => { void request("POST", `/api/channels/${ch}/typing`, { active }).catch(() => {}); },
   memoir: (kind, id, markSeen = false) => request("GET", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/memoir${markSeen ? "?markSeen=1" : ""}`),
   setRules: (kind, id, text) => request("PUT", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/rules`, { text }),
   addMemoirNote: (kind, id, text, pinned = false) => request("POST", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/notes`, { text, pinned }),
