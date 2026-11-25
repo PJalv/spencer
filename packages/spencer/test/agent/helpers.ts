@@ -20,7 +20,7 @@ import type {
 } from "../../src/contracts.ts";
 
 /** What a channel conversation is offered without MCP tools. */
-export const CHANNEL_TOOLS = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "schedule_followup", "cancel_followup"];
+export const CHANNEL_TOOLS = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "list_transfers", "schedule_followup", "cancel_followup"];
 
 export const ME = { id: "me-id-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "Alice's Spencer", fingerprint: "aaaa-aaaa-aaaa-aaaa-aaaa" };
 export const BOB = { id: "bob-id-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "Bob's Spencer", fingerprint: "bbbb-bbbb-bbbb-bbbb-bbbb" };
@@ -119,6 +119,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
       core.messages.push({ id, ch, from: ME.id, mine: true, ts: Date.now(), type: "chat", text: msg.text, hop: msg.hop, by: msg.by, status: "pending", ...(msg.convo ? { convo: msg.convo } : {}) });
       return { id };
     },
+    sendTyping() {},
     sendStatus(ch, s) {
       core.statuses.push({ ch, ...s });
     },

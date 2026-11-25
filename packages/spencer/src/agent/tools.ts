@@ -33,7 +33,7 @@ export interface ToolDeps {
   askOwner?(ch: string, from: string, text: string): Promise<string>;
   /** Follow-ups for the conversation `key` (owner or ch:<id>). Return the tool's answer. */
   followups?: {
-    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string }): Promise<string | { text: string; isError: true }>;
+    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string; watch?: boolean; maxWakes?: number }): Promise<string | { text: string; isError: true }>;
     cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
   };
   /** `search_news`'s HTTP client (tests replace it). */
@@ -41,8 +41,8 @@ export interface ToolDeps {
   log?(msg: string): void;
 }
 
-export const OWNER_TOOL_NAMES = ["read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
-export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send"];
+export const OWNER_TOOL_NAMES = ["update_work_brief", "list_work_brief", "read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
+export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "list_transfers"];
 export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
 export const CONVERSATION_TOOL_NAMES = ["search_news"];
 /** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
@@ -124,6 +124,21 @@ function offlineNote(ch: Channel): string {
 export function ownerTools(deps: ToolDeps): ToolSpec[] {
   const { core } = deps;
   return [
+    {
+      name: "list_work_brief", description: "List the owner's current work brief.", parameters: schema({}),
+      async execute(_args: object, ctx) {
+        if (ctx.conversationKey !== "owner") return fail("owner conversation required");
+        return JSON.stringify(core.workBrief?.list() ?? []);
+      },
+    },
+    {
+      name: "update_work_brief", description: "Create or update a work brief item by stable key.",
+      parameters: schema({ key: str("Stable key"), title: str("Title"), summary: str("Summary"), visibility: { type: "string", enum: ["private", "trusted", "public"] }, status: { type: "string", enum: ["active", "blocked", "done"] }, project: str("Project"), source: str("Source") }, ["title", "summary"]),
+      async execute(args: { key?: string; title: string; summary: string; visibility?: "private" | "trusted" | "public"; status?: "active" | "blocked" | "done"; project?: string; source?: string }, ctx) {
+        if (ctx.conversationKey !== "owner") return fail("owner conversation required");
+        try { if (!core.workBrief) return fail("work brief unavailable"); return JSON.stringify(core.workBrief.upsert(args)); } catch (e) { return fail((e as Error).message); }
+      },
+    },
     {
       name: "read_peer_profile",
       description:
@@ -270,6 +285,8 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
             inMinutes: AWAIT_REPLY_MINUTES,
             note: `Handle the answer from ${ch.name} to what you sent: ${short}`,
             onReplyFrom: ch.id,
+            watch: true,
+            maxWakes: 5,
           });
           wait = typeof r === "string" ? ` ${r}` : ` (Could not wait for the answer: ${r.text}.)`;
         }
@@ -308,14 +325,16 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
       name: "list_transfers",
       description: "List file transfers, optionally only those of one channel.",
       parameters: schema({ channel: str("Channel id or name (optional)") }),
-      async execute(args: { channel?: string }) {
-        let chId: string | undefined;
-        if (args.channel) {
+      async execute(args: { channel?: string }, ctx) {
+        const channel = ctx.conversationKey === "owner" ? undefined : channelOfKey(core, ctx);
+        if (ctx.conversationKey !== "owner" && !channel) return fail("unknown channel");
+        let chId: string | undefined = channel?.id;
+        if (!channel && args.channel) {
           const ch = resolveChannel(core, args.channel);
           if (typeof ch === "string") return fail(ch);
           chId = ch.id;
         }
-        const list = core.listTransfers(chId).map((t) => ({
+        const list = core.listTransfers(chId).filter(t => !chId || t.ch === chId).map((t) => ({
           tid: t.tid,
           ch: t.ch,
           direction: t.direction,
@@ -328,7 +347,7 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
           updatedAt: new Date(t.updatedAt).toISOString(),
           ...(t.via ? { via: t.via } : {}),
           ...(t.error ? { error: t.error } : {}),
-          ...(t.path && t.direction === "in" ? { path: t.path } : {}),
+          ...(t.path && t.direction === "in" && (!channel || channel.trust === "full") ? { path: t.path } : {}),
         }));
         return list.length ? JSON.stringify(list, null, 1) : "No transfers.";
       },
@@ -511,11 +530,12 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         {
           in_minutes: { type: "number", minimum: FOLLOWUP_MIN_MINUTES, maximum: FOLLOWUP_MAX_MINUTES, description: "Minutes from now" },
           note: str("What to do then, with every detail you will need (ids, links, who asked)"),
+          watch: { type: "boolean", description: "Keep waiting for updates until final, timeout, cancellation or five wakes" },
           on_reply_from: str("Owner conversation only: channel id or name whose next peer message wakes you early"),
         },
         ["in_minutes", "note"],
       ),
-      async execute(args: { in_minutes: number; note: string; on_reply_from?: string }, ctx) {
+      async execute(args: { in_minutes: number; note: string; on_reply_from?: string; watch?: boolean }, ctx) {
         if (!deps.followups) return fail("follow-ups are not available");
         const minutes = Number(args.in_minutes);
         if (!Number.isFinite(minutes) || minutes < FOLLOWUP_MIN_MINUTES || minutes > FOLLOWUP_MAX_MINUTES) {
@@ -525,6 +545,7 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         if (!note) return fail("note is empty");
         return deps.followups.schedule(ctx.conversationKey, {
           inMinutes: minutes,
+          watch: args.watch === true,
           note,
           ...(args.on_reply_from ? { onReplyFrom: String(args.on_reply_from) } : {}),
         });

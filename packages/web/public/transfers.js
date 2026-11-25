@@ -58,7 +58,7 @@ async function act(t, action) {
   if (res && res.tid) upsertTransfer(res);
 }
 
-const PREVIEW_EXT = /\.(?:md|markdown|html|htm)$/i;
+const PREVIEW_EXT = /\.(?:env\.example|md|markdown|html|htm|txt|json|log|diff|patch|csv|tsv|yaml|yml|toml|xml|ini|sh|py|js|mjs|ts|tsx|jsx|css|sql|rs|go|c|h|cpp|java|rb|nix|png|jpg|jpeg|gif|webp)$/i;
 
 async function previewTransfer(t) {
   const status = h("p.document-preview-status", { role: "status" }, "Loading preview…");
@@ -72,6 +72,10 @@ async function previewTransfer(t) {
       status.replaceWith(rendered);
     } else if (result.kind === "html") {
       status.replaceWith(htmlPreviewFrame(result.content, result.name));
+    } else if (result.kind === "text") {
+      status.replaceWith(h("pre", null, h("code", null, result.content)));
+    } else if (result.kind === "image") {
+      status.replaceWith(h("img", { src: `data:${result.mimeType};base64,${result.dataBase64}`, alt: result.name, style: "max-width:100%" }));
     } else {
       status.textContent = "This file type is not supported for preview.";
     }
@@ -149,6 +153,9 @@ export function transferCard(t, opts = {}) {
       "div.quarantine",
       null,
       h("div.quarantine-row", null, h("code.path", { title: t.path }, t.path), PREVIEW_EXT.test(t.name) ? h("button.btn.sm", { type: "button", on: { click: () => previewTransfer(t) } }, "Preview") : null, iconButton("copy", "Copy path", async () => toast((await copyText(t.path)) ? "Path copied" : "Copy failed", "info"), "sm")),
+      h("div.quarantine-row", null,
+        h("button.btn.sm", { type: "button", on: { click: () => attempt(() => api.transferDownload(t.tid, t.name)) } }, "Download"),
+        h("button.btn.sm", { type: "button", on: { click: (event) => { const button = event.currentTarget; if (button.dataset.confirm !== "yes") { button.dataset.confirm = "yes"; button.textContent = "Confirm delete file"; return; } attempt(() => api.deleteTransferFile(t.tid)).then(result => result && upsertTransfer(result)); } } }, "Delete file")),
       h("p.quarantine-note", null, icon("warn", 14), " In quarantine. Inspect it before you open it."),
     );
   }

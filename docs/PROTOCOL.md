@@ -97,6 +97,7 @@ type Body =
   | { type: "file_cancel"; tid: string; to: string; reason: string }
   | { type: "link_offer" | "link_answer"; to: string; sid: string; sealed: string }
   | { type: "link_close"; to: string; sid: string; reason?: string }
+  | { type: "typing"; active: boolean }
   | { type: "status"; replyTo: string;                                  // activity ≤ 200 chars
       state: "working" | "done" | "input_required" | "completed" | "failed"; activity?: string };
 ```
@@ -202,7 +203,7 @@ The relay already knows which identities have an authenticated connection; it sh
 `{t:"send", rid, env, ephemeral: true}` gets the same checks as a normal send (membership, `from`, signature,
 size, rate limit) but the relay does not store it, assigns no `seq`, keeps no dedupe record, and replies
 `ok {id}`. It pushes `{t:"eph", ch, env}` once to the other members' *subscribed* connections; members who are
-offline never get it. Spencers send `status` and `link_*` bodies this way and accept those bodies from `eph` frames
+offline never get it. Typing is sent only to relays advertising `ephemeral`, expires after 15 seconds, and never wakes an agent. Spencers send `status`, `typing`, and `link_*` bodies this way and accept those bodies from `eph` frames
 (after the same relay, envelope, signature and membership checks as the inbox; nothing is stored or acked).
 Backward compatible both ways: an older relay ignores the `ephemeral` flag and stores the message (receivers drop a
 stale status), and an older Spencer ignores the unknown `eph` frame (it just doesn't see live status).
@@ -245,14 +246,21 @@ stale status), and an older Spencer ignores the unknown `eph` frame (it just doe
 Files use a direct link or croc, in both direct and group channels. Files never go through the message relay. The croc relay address and password come from the relay's
 `welcome`/`join` frames (`croc`), and local config can override them. Pinned croc: **v10.3.1**.
 
+Browser uploads stream into private staging while computing SHA-256, then move into outgoing storage. Channel uploads allow 256 MiB per file and 512 MiB per composer batch; owner attachments retain their 25 MiB limit. Human owner sends skip approval, including Standard channels. Agent sends retain the channel trust and policy checks.
+
+Incoming completion appends an untrusted context note to the channel without starting a run. Channel `list_transfers` is scoped to that channel; only Full trust exposes incoming quarantine paths. Incoming file contents remain untrusted data.
+
+The crash marker records only handshakes. Verified steady-state links do not arm the crash breaker. Without a croc relay, unavailable direct links produce a diagnostic reason and bounded exponential retries, followed by `file_cancel` on exhaustion.
+
 ### 6.1 Sender states
 `awaiting_approval → offered → sending → completed`
 Terminal: `completed | denied | declined | failed | expired | cancelled`
 
 1. **Request** (owner UI, the owner agent's `send_file`, or a peer agent's `propose_file_send`): the file
-   is copied into `<data>/outgoing/<tid>/<basename>`, its sha256 and size are recorded, and the state
-   becomes `awaiting_approval`. With `policy.requireApprovalForOutgoingFiles = false`, only owner-initiated
-   sends skip straight to `offered`. Peer-initiated sends **always** need approval.
+   is staged in `<data>/outgoing/<tid>/<basename>`, and its SHA-256 and size are recorded.
+   Human owner sends and Full-trust channel sends become `offered` immediately.
+   In Standard channels, peer-agent sends require approval. Owner-agent sends require approval when
+   `policy.requireApprovalForOutgoingFiles` is enabled. These sends become `awaiting_approval`.
 2. **Approve**: enqueue `file_offer` (expires in 24 h by default) → `offered`. **Deny** → `denied` and delete the staged copy.
 3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Try a direct link when eligible (§6.5). For a croc attempt, spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local <staged file>` with env
@@ -350,7 +358,12 @@ It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** o
 6. The channel's turn budget allows it (below). Else `"rate limited"` (per-minute burst: the message is skipped) or
    `"budget exhausted"` (the channel pauses and the owner is asked).
 
-The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from]}`, unless the
+Group agent replies resolve explicit `@handle` references against present, named non-self members.
+Their deduplicated `mentions` contains the original sender and those resolved members, excluding self.
+Channel follow-ups use the same resolution. Plain names without `@` do not add recipients; agent messages with
+explicit recipient IDs are routed only to those IDs.
+
+The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from, ...resolved]}`, unless the
 trimmed answer is `NO_REPLY` (nothing is sent). If the answer ends with the marker `[END]` (on its own line or at the
 end of the last line), the marker is removed and the chat carries `final: true`; an answer that is only `[END]` sends
 nothing. When the message being answered is itself automatic (`hop > 0`) and the answer repeats one of my own last 3
@@ -395,17 +408,24 @@ without trading acknowledgements forever and without a peer being able to run up
   Spencers that predate this version stop at their own cap of 4.
 
 ### 7.3 Owner notification
-When a peer message replies to a message the owner conversation sent, it is appended to the owner
+When a peer message replies to a message the owner conversation sent, or arrives in a channel with an active watch, it is appended to the owner
 conversation as a **write** (it never starts a run), clearly marked as untrusted: the model sees it wrapped in
 `<peer_message>`, and the transcript item has `untrusted: true` (§8), which the UI uses to style it. The owner
 sees the answer there, and the owner's model has it as context the next time the owner speaks.
+
+Channel MCP calls also append an untrusted owner note with a sanitized, bounded result or failure preview. Channel
+follow-up messages append an untrusted summary so the owner can see autonomous outcomes.
+
+Approved peer tasks remain `working` while linked owner follow-ups are pending or running. The task linkage propagates
+through follow-up chains; `completed` (or `failed`) is sent when the chain finishes. Without follow-ups, the first owner
+turn determines the terminal status. Channel agents end approval-wait and refusal messages with `[END]`.
 
 By default a peer can never start a run in the owner conversation. The owner's Spencer can opt in, one message at a
 time: an owner follow-up with `on_reply_from` (or `send_message` with `await_reply`) fires as soon as a peer writes
 in that channel (§7.4).
 
 ### 7.4 Follow-ups ("I'll get back to you")
-An agent that starts something slow (a T3 Code thread, a build) can schedule a reminder on itself and report later
+An agent that starts something slow (a peer task, a build) can schedule a reminder on itself and report later
 without anyone writing first. Tools, offered in the owner conversation and in every channel conversation:
 - `schedule_followup {in_minutes, note}`: `in_minutes` between 1 and 10080 (a week). `note` is what the agent wants
   to do then, in its own words.
@@ -413,12 +433,13 @@ without anyone writing first. Tools, offered in the owner conversation and in ev
 - Owner conversation only: `schedule_followup {…, on_reply_from: <channel>}` also fires as soon as a peer writes in
   that channel; `send_message {…, await_reply: true}` sends and schedules such a follow-up for 60 minutes with the
   note "Handle the answer from <channel> to what you sent: <text>". (`send_message {…, final: true}` sends a closing
-  message instead, §3.1.)
+  message instead, §3.1.) `await_reply` creates a multi-turn watch with at most five wakes. Explicit
+  `schedule_followup` calls can opt in with `watch: true` together with `on_reply_from`.
 
 Storage and delivery (`agent/followups.ts`): rows in `agent_followups` in core.db, so they survive restarts. A timer
 compares `dueAt` with the wall clock at least every 15 s, so a follow-up that came due while the laptop slept fires
 right after wake (Node timers stop during suspend). Firing is exactly-once: `pending → fired` is one conditional
-update, the run is submitted with `requestId = "followup:" + id`, and a channel message is enqueued with
+update, the run is submitted with `requestId = "followup:" + id + ":w" + wake_count`, and a channel message is enqueued with
 `idempotencyKey = "followup:" + id`. On start, fired-but-unfinished follow-ups are resumed.
 
 When one fires, its conversation gets an input (shown in transcripts as "Follow-up: <note>"):
@@ -435,8 +456,11 @@ When one fires, its conversation gets an input (shown in transcripts as "Follow-
 
 **Waking the owner on a reply (opt-in).** This is the one way a peer's message can start a run in the privileged owner
 conversation, so it is guarded by everything above:
-- Only a follow-up the owner's Spencer scheduled with `on_reply_from` fires this way, once (one-shot). The peer
-  decides only *when*; the instruction that runs is the owner agent's own note. The peer's message is appended first as
+- Only a follow-up the owner's Spencer scheduled with `on_reply_from` fires this way. Ordinary follow-ups are
+  one-shot. Watches re-arm after each non-final wake until the wake cap, deadline, peer `final: true`, or cancellation.
+  The owner input identifies the wake and whether the peer ended the exchange. The owner agent can cancel a settled
+  watch with `cancel_followup`. Each wake increments the persisted counter and clears its submission ID before re-arming.
+  The peer decides only *when*; the instruction that runs is the owner agent's own note. The peer's message is appended first as
   an untrusted note ("Message from … (untrusted)" / "Reply from …"), never as instructions.
 - The wake is an automatic turn in that channel: it needs and spends the channel's turn budget (§7.2). If the budget
   is used up, nothing fires early (the follow-up fires at its time) and the usual "continue?" card appears.
@@ -511,6 +535,12 @@ Turning them on or off reconfigures every conversation right away; no restart is
 
 ## 8. Local daemon API (127.0.0.1 only)
 
+- `POST /api/p2p/reset` accepts `{ ch?: string }` and clears persisted crash disables for one channel or all channels. Returns current P2P status. State exposes active disable expiry times in `p2p.crashDisabled`.
+- `GET /api/transfers/:tid/download` streams a completed incoming quarantine file as an attachment with `nosniff` and `no-store` headers. Quarantine directories and file symlinks are rejected.
+- `DELETE /api/transfers/:tid/file` removes the completed incoming quarantine file, clears its stored path, emits an updated transfer, and preserves history.
+- `GET /api/transfers/:tid/preview` returns `{ name, kind, content }` for Markdown, sandboxed HTML, or UTF-8 source/text files (1 MiB maximum). Raster PNG, JPEG, GIF, and WebP return `{ name, kind: "image", mimeType, dataBase64 }` (10 MiB maximum). SVG is rejected. Text renders as text nodes; HTML uses the sandboxed preview frame.
+
+
 - It binds to `127.0.0.1` only. Requests must have `Host: 127.0.0.1:<port>` or `localhost:<port>`
   (DNS-rebinding guard). Every `/api` call needs the header `X-Spencer-Token: <token>`. The token is
   injected into `index.html` as `<meta name="spencer-token">`. Cross-origin pages can't read that file,
@@ -527,6 +557,7 @@ Turning them on or off reconfigures every conversation right away; no restart is
 | GET | `/api/channels` | → `{items: Channel[]}` |
 | GET | `/api/channels/:ch` | → `Channel` |
 | GET | `/api/channels/:ch/messages?limit=&before=&markRead=` | → `{items: ChannelMessage[]}`: chat and hello messages, oldest first, default 100, max 1000. `before` is a **message id**: return the messages older than it (the UI passes the oldest message it has loaded). An unknown id → 404. Without `before`, the channel is marked read unless `markRead=false`; this is used for passive timeline reconciliation. |
+| POST | `/api/channels/:ch/typing` | `{active: boolean}` → `{}`; best-effort ephemeral human typing indicator. |
 | POST | `/api/channels/:ch/messages` | `{text, mentions?}` → `{id}` (owner speaks as a human in the channel; hop 0, by "human") |
 | PATCH | `/api/channels/:ch` | `{name?, autoReply?, shareBio?: boolean, allowedMcpTools?: string[], trust?: "standard"\|"full", directLink?: "auto"\|"off", allowLocalAddresses?: boolean, heated?: boolean}` → `Channel` (`heated`: Conversations channels only, §7.5) |
 | GET | `/api/requests` | → `{items: OwnerRequest[]}` (newest first, max 200) |
@@ -803,3 +834,9 @@ memoir rules. Peer bios in group prompts and `list_peers` retain both their head
 and tail within 1200 UTF-16 code units. BIO scope instructions tell agents to
 politely decline clearly out-of-scope requests and end with `[END]`, reserving
 `ask_owner` for in-scope work requiring approval.
+
+### Work Brief and external agents
+
+The authenticated local API exposes `GET /api/work-brief` with optional `visibility`, `status`, and `project` filters, `POST /api/work-brief` to insert or upsert by `key`, and `PATCH` or `DELETE /api/work-brief/:id`. Items include a title, summary, visibility (`private`, `trusted`, or `public`), status (`active`, `blocked`, or `done`), optional project, links, source, and expiry. Changes emit a `work_brief` event. Private items stay in the owner context; trusted items may appear in full-trust work channels; public items may appear in standard and full-trust work channels.
+
+POST accepts `notifyOwner` for an untrusted owner note, `wakeOwner` to request an owner turn with the external status wrapped as untrusted data, and `notifyChannel` with an optional `final` flag to post to a permitted channel. Visibility must be `private`, `trusted`, or `public`; `null` is invalid. Unauthorized channel notifications are rejected before writing. The store retains at most 50 live items and the 25 most recently updated completed items. Use a stable key to update an item in place. The `spencer mcp spencer` bridge also provides `spencer_publish_update`, `spencer_work_brief`, `spencer_read_peer`, `spencer_add_memoir_note`, `spencer_send_file`, and `spencer_list_transfers` to local agents and scripts.

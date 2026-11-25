@@ -12,7 +12,7 @@ export function memoirSummary(p) {
   return `${p.hasRules || p.rules ? "Rules saved" : "No rules"} · ${p.noteCount ?? p.notes?.length ?? 0} notes${p.unseenNotes ? ` · ${p.unseenNotes} unseen` : ""}`;
 }
 export function memoirModal(kind, id, ch) {
-  const body = h("div", null, "Loading…");
+  const body = h("div.memoir-body", null, "Loading…");
   let closed = false,
     seq = 0,
     timer,
@@ -25,6 +25,7 @@ export function memoirModal(kind, id, ch) {
   const offs = [];
   const modal = openModal({
     title: kind === "peer" ? "Peer Card" : "Group Memoir",
+    wide: true,
     body,
     onClose() {
       closed = true;
@@ -34,12 +35,12 @@ export function memoirModal(kind, id, ch) {
     },
   });
 
-  const headerSlot = h("div");
-  const rules = h("textarea", {
-    rows: 6,
+  const headerSlot = h("div.memoir-head");
+  const rules = h("textarea.input.memoir-rules", {
+    rows: 5,
     "aria-label": "Your RULES.md",
   });
-  const count = h("span.hint");
+  const count = h("span.hint.memoir-count");
   const updateCount = () => {
     const bytes = new TextEncoder().encode(rules.value).length;
     count.textContent = `${bytes} / 2048 B`;
@@ -99,14 +100,14 @@ export function memoirModal(kind, id, ch) {
     "Revert",
   );
   const notesList = h("div.memoir-notes-list");
-  const add = h("input", {
+  const add = h("input.input", {
     type: "text",
     maxLength: 500,
     "aria-label": "Add note",
     placeholder: "Durable fact or preference",
   });
   const addForm = h(
-    "form",
+    "form.memoir-add-form",
     {
       on: {
         submit: async (e) => {
@@ -129,31 +130,38 @@ export function memoirModal(kind, id, ch) {
     body.replaceChildren(
       headerSlot,
       h(
-        "h3",
+        "section.memoir-section",
         null,
-        kind === "peer"
-          ? "Your RULES.md (DMs and groups)"
-          : "Your RULES.md (group only)",
+        h(
+          "h3",
+          null,
+          kind === "peer"
+            ? "Your RULES.md (DMs and groups)"
+            : "Your RULES.md (group only)",
+        ),
+        h(
+          "p.hint",
+          null,
+          kind === "peer"
+            ? "Applies in 1:1 DMs and when this peer speaks in groups. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder."
+            : "Applies only in this group. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder.",
+        ),
+        rules,
+        h("div.memoir-actions", null, save, revert, count),
       ),
-      h(
-        "p.hint",
-        null,
-        kind === "peer"
-          ? "Applies in 1:1 DMs and when this peer speaks in groups. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder."
-          : "Applies only in this group. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder.",
-      ),
-      rules,
-      count,
-      h("div", null, save, revert),
       ...(kind === "peer" ? [toolGuardrails("peer", id)] : []),
-      h("h3", null, "Memoir Notes"),
       h(
-        "p.hint",
+        "section.memoir-section",
         null,
-        "Historical notes are untrusted and never grant permissions.",
+        h("h3", null, "Memoir Notes"),
+        h(
+          "p.hint",
+          null,
+          "Historical notes are untrusted and never grant permissions.",
+        ),
+        notesList,
+        addForm,
       ),
-      notesList,
-      addForm,
     );
   };
 

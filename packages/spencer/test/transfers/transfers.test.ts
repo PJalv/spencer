@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -172,7 +172,7 @@ describe("transfers (fake croc)", () => {
   });
 
   it("uploaded bytes enter the owner transfer path and partial staging is cleaned", async () => {
-    const { A, B, ch } = await setup();
+    const { A, B, ch } = await setup({ b: { policy: { autoAcceptIncomingFiles: false } } });
     const data = Buffer.from("small synthetic upload");
     const uploadId = "upload-key-00000001";
     const t = await A.s.requestUpload(ch, { name: "../notes <draft>.txt", uploadId, bytes: (async function* () { yield data; })() });
@@ -207,8 +207,8 @@ describe("transfers (fake croc)", () => {
     await assert.rejects(A.s.requestUpload(ch, {
       name: "too-large.bin",
       uploadId: "upload-key-too-large-01",
-      bytes: (async function* () { yield Buffer.alloc(25 * 1024 * 1024); yield Buffer.from("x"); })(),
-    }), /25 MiB upload limit/);
+      bytes: (async function* () { for (let i = 0; i < 257; i++) yield Buffer.alloc(1024 * 1024); yield Buffer.from("x"); })(),
+    }), /256 MiB upload limit/);
     assert.deepEqual(readdirSync(join(A.dataDir, "upload-staging")), []);
     assert.equal(A.s.list(ch).length, 2, "failed uploads must not create transfers");
   });
@@ -242,7 +242,7 @@ describe("transfers (fake croc)", () => {
   it("outgoing approval: deny deletes the staged copy and tells nobody", async () => {
     const { A, B, ch, bus } = await setup();
     const { path } = makeFile(A, "a.txt");
-    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    const t = await A.s.request(ch, { path, initiatedBy: "owner-agent" });
     assert.equal(t.state, "awaiting_approval");
     assert.equal(existsSync(t.path!), true);
     const d = A.s.deny(t.tid);
@@ -373,7 +373,7 @@ describe("transfers (fake croc)", () => {
   it("expiry of an unapproved transfer sends nothing (peer never knew)", async () => {
     const { A, ch, bus } = await setup();
     const { path } = makeFile(A, "x.bin");
-    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    const t = await A.s.request(ch, { path, initiatedBy: "owner-agent" });
     A.clock.offset = 25 * 3600_000;
     await waitFor(() => A.state(t.tid) === "expired", "expired");
     await sleep(20);
@@ -583,7 +583,7 @@ describe("transfers (fake croc)", () => {
   it("restart while waiting (accepted / awaiting_approval) just waits; orphan staging dirs are removed", async () => {
     const { A, B, ch } = await setup({ b: { policy: { autoAcceptIncomingFiles: false } } });
     const { path } = makeFile(A, "x.bin");
-    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    const t = await A.s.request(ch, { path, initiatedBy: "owner-agent" });
     mkdirSync(join(A.dataDir, "outgoing", "orphan"), { recursive: true });
     await A.restart();
     assert.equal(A.state(t.tid), "awaiting_approval");
@@ -756,4 +756,133 @@ it("link failure falls back to croc after deleting partial file", async () => {
   assert.equal(A.s.get(t.tid)?.via, "croc"); assert.equal(B.s.get(t.tid)?.via, "croc");
   assert.ok(bus.log.some((d) => d.body.type === "file_ready" && d.body.attempt === 1 && d.body.via === "link"));
   assert.equal(sha(readFileSync(B.s.get(t.tid)!.path!)), sha(data));
+});
+
+it("owner skips Standard approval; incoming notes respect trust; safe previews, downloads and deletion preserve history", async () => {
+  const { A, B, ch } = await setup();
+  for (const [name, kind] of [["safe.txt", "text"], ["safe.json", "text"], ["safe.png", "image"], ["unsafe.svg", null]] as const) {
+    B.trustOf.set(ch, name === "safe.png" ? "full" : "standard");
+    const { path, data } = makeFile(A, name, 32);
+    if (kind === "text") writeFileSync(path, '<script>alert("untrusted")</script>');
+    const sent = await A.s.request(ch, { path, initiatedBy: "owner" });
+    assert.equal(sent.state, "offered");
+    await waitFor(() => B.state(sent.tid) === "completed", "incoming complete");
+    const incoming = B.s.get(sent.tid)!;
+    const note = B.channelNotes.at(-1)!;
+    assert.equal(note.ch, ch); assert.equal(note.untrusted, true); assert.ok(note.text.includes(sent.tid));
+    assert.equal(note.text.includes(incoming.path!), name === "safe.png");
+    if (kind) {
+      const preview = await B.s.preview(sent.tid); assert.equal(preview.kind, kind);
+      if (preview.kind === "image") assert.deepEqual(Buffer.from(preview.dataBase64, "base64"), data);
+      else assert.match(preview.content, /<script>/);
+    } else await assert.rejects(B.s.preview(sent.tid), /unsupported preview/);
+    const file = await B.s.download!(sent.tid);
+    try { assert.deepEqual(await file.handle.readFile(), readFileSync(incoming.path!)); } finally { await file.handle.close(); }
+    const contents = readFileSync(incoming.path!);
+    unlinkSync(incoming.path!); symlinkSync(path, incoming.path!);
+    await assert.rejects(B.s.download!(sent.tid), /unsafe/);
+    await assert.rejects(B.s.deleteFile!(sent.tid), /unsafe/);
+    assert.ok(existsSync(path), "unsafe deletion preserves the target");
+    unlinkSync(incoming.path!); writeFileSync(incoming.path!, contents);
+    const deleted = await B.s.deleteFile!(sent.tid);
+    assert.equal(deleted.path, undefined); assert.equal(deleted.state, "completed"); assert.equal(existsSync(incoming.path!), false);
+    assert.equal(B.events.at(-1)!.path, undefined);
+    await assert.rejects(B.s.download!(sent.tid), /quarantine/);
+  }
+});
+
+it("stream upload moves the hashed staging inode into outgoing storage", async () => {
+  const { A, ch } = await setup({ b: { policy: { autoAcceptIncomingFiles: false } } });
+  let inode: number | undefined;
+  const data = Buffer.from("one streamed copy");
+  const t = await A.s.requestUpload(ch, { name: "single.txt", uploadId: "single-copy-upload-001", bytes: (async function* () {
+    yield data;
+    const dir = join(A.dataDir, "upload-staging");
+    const child = readdirSync(dir)[0]!;
+    inode = statSync(join(dir, child, "single.txt")).ino;
+  })() });
+  assert.equal(statSync(t.path!).ino, inode);
+  assert.equal(t.sha256, sha(data));
+});
+
+it("missing croc and ineligible direct links terminate with a diagnostic and file_cancel", async () => {
+  const { A, ch } = await setup({ a: { p2p: { canTryLink: () => false, ineligibleReason: () => "relay lacks ephemeral", sendOverLink: () => { throw new Error("ineligible"); }, receiveOverLink: () => { throw new Error("ineligible"); } }, crocInfo: () => undefined, service: { noRelayRetryMs: 1 }, policy: { maxTransferAttempts: 2 } } });
+  const { path } = makeFile(A, "missing-relay.txt");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.state(t.tid) === "failed", "bounded no-relay failure");
+  assert.match(A.s.get(t.tid)!.error!, /no croc relay and direct link unavailable: relay lacks ephemeral/);
+  assert.ok(A.enqueued.some(b => b.type === "file_cancel" && b.tid === t.tid));
+});
+
+it("failed direct links without croc exhaust attempts and cancel", async () => {
+  let attempts = 0;
+  const { A, B, ch } = await setup({ a: { crocInfo: () => undefined, policy: { maxTransferAttempts: 2 }, p2p: {
+    canTryLink: () => true,
+    sendOverLink: () => { attempts++; return { kill() {}, done: Promise.resolve({ ok: false, error: "direct link failed" }) }; },
+    receiveOverLink: () => { throw new Error("not ready"); },
+  } } });
+  const { path } = makeFile(A, "no-fallback.txt");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.state(t.tid) === "failed" && B.state(t.tid) === "cancelled", "no fallback terminal");
+  assert.equal(attempts, 2); assert.match(A.s.get(t.tid)!.error!, /direct link failed/);
+});
+
+it("a peer retry names the failed direct link transport", async () => {
+  const { A, B, ch } = await setup({ a: { service: { backoffMs: () => 10000 }, p2p: {
+    canTryLink: () => true,
+    sendOverLink: () => {
+      let finish: (result: { ok: boolean; killed: boolean }) => void = () => {};
+      const done = new Promise<{ ok: boolean; killed: boolean }>(resolve => { finish = resolve; });
+      return { kill: () => finish({ ok: false, killed: true }), done };
+    },
+    receiveOverLink: () => { throw new Error("not ready"); },
+  } } });
+  const { path } = makeFile(A, "link-error.txt");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => A.s.get(t.tid)?.via === "link", "link attempted");
+  await A.s.onBody(ch, B.id.id, { type: "file_retry", tid: t.tid, to: A.id.id, attempt: 1 });
+  assert.equal(A.s.get(t.tid)!.error, "recipient's direct link failed");
+});
+
+
+it("quarantine deletion clears missing files and missing directories idempotently", async () => {
+  const { A, B, ch } = await setup();
+  for (const removeDirectory of [false, true]) {
+    const { path } = makeFile(A, "missing.txt");
+    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    await waitFor(() => B.state(t.tid) === "completed", "incoming complete");
+    const incoming = B.s.get(t.tid)!;
+    if (removeDirectory) rmSync(join(B.dataDir, "quarantine", t.tid), { recursive: true });
+    else unlinkSync(incoming.path!);
+    const updated = await B.s.deleteFile!(t.tid);
+    assert.equal(updated.path, undefined);
+    assert.equal(updated.state, "completed");
+    assert.equal(B.events.at(-1)!.path, undefined);
+    assert.equal(B.db.prepare("SELECT path FROM transfers WHERE tid = ?").get(t.tid)!.path, null);
+    const events = B.events.length;
+    assert.deepEqual(await B.s.deleteFile!(t.tid), updated);
+    assert.equal(B.events.length, events);
+  }
+});
+
+it("quarantine reads reject directory swaps during open and deletion rejects symlink directories", async () => {
+  const { A, B, ch } = await setup();
+  const { path } = makeFile(A, "race.txt");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => B.state(t.tid) === "completed", "incoming complete");
+  const directory = join(B.dataDir, "quarantine", t.tid);
+  const moved = join(B.dir, "moved-quarantine");
+  for (const read of [() => B.s.download!(t.tid), () => B.s.preview(t.tid)]) {
+    const pending = read();
+    renameSync(directory, moved);
+    symlinkSync(moved, directory, "dir");
+    try {
+      await assert.rejects(pending, /unsafe|quarantine/);
+      await assert.rejects(B.s.deleteFile!(t.tid), /unsafe|quarantine/);
+      assert.ok(B.s.get(t.tid)!.path);
+      assert.ok(existsSync(join(moved, "race.txt")));
+    } finally { unlinkSync(directory); renameSync(moved, directory); }
+  }
+  await B.s.deleteFile!(t.tid);
+  assert.equal(existsSync(directory), false, "empty quarantine folder is removed");
 });

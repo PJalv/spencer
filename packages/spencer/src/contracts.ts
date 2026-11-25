@@ -1,5 +1,6 @@
 import type { ToolPolicyStore } from "./agent/tool-policy.ts";
 import type { Memoir } from "./memoir.ts";
+import type { WorkBriefStore } from "./work-brief.ts";
 /**
  * Internal contracts between the parts of the Spencer daemon.
  *
@@ -209,6 +210,9 @@ export interface OwnerRequest {
 
 /** A reminder an agent scheduled on itself (`schedule_followup`), see PROTOCOL.md §7.4. */
 export interface Followup {
+  watch?: boolean;
+  maxWakes?: number;
+  wakeCount?: number;
   id: string;
   /** Which conversation it wakes: the owner's, or a channel's (`ch`). */
   conversation: "owner" | "channel";
@@ -241,6 +245,8 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "typing"; ch: string; from: string; active: boolean; ts: number }
+  | { type: "work_brief" }
   | { type: "tool_policies"; scopeKind: "global" | "peer" | "channel"; scopeId: string }
   | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
@@ -284,6 +290,7 @@ export interface EventSink {
 /** What the transfer manager needs from the core. */
 export interface TransferP2pJob { kill(): void; done: Promise<{ ok: boolean; killed?: boolean; error?: string; resumedFrom?: number }>; }
 export interface TransferP2pAdapter {
+  ineligibleReason?(ch: string, peerId: string, size: number, hasCroc: boolean): string | undefined;
   canTryLink(ch: string, peerId: string, size: number, hasCroc: boolean): boolean;
   sendOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; filePath: string; size: number; onReady: () => void; onProgress: (fraction: number) => void }): TransferP2pJob;
   receiveOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; partPath: string; finalPath: string; size: number; onProgress: (fraction: number) => void }): TransferP2pJob;
@@ -318,6 +325,7 @@ export interface TransferDeps {
    * model sees it wrapped as data, not as instructions.
    */
   ownerNote(text: string, opts?: { untrusted?: boolean }): void;
+  channelTransferNote?(ch: string, text: string, opts?: { untrusted?: boolean }): void;
   /** Diagnostic log line (not shown to the owner). */
   log?: (msg: string) => void;
   now?: () => number;
@@ -343,11 +351,7 @@ export interface TransferUpload {
   bytes: AsyncIterable<Uint8Array>;
 }
 
-export interface TransferPreview {
-  name: string;
-  kind: "markdown" | "html";
-  content: string;
-}
+export type TransferPreview = { name: string; kind: "markdown" | "html" | "text"; content: string } | { name: string; kind: "image"; mimeType: string; dataBase64: string };
 
 export interface TransferService {
   start(): Promise<void>;
@@ -364,6 +368,8 @@ export interface TransferService {
   list(ch?: string): Transfer[];
   get(tid: string): Transfer | undefined;
   preview(tid: string): Promise<TransferPreview>;
+  download?(tid: string): Promise<{ name: string; size: number; handle: import("node:fs/promises").FileHandle }>;
+  deleteFile?(tid: string): Promise<Transfer>;
 }
 
 // ---------------------------------------------------------------- core → agent
@@ -396,6 +402,7 @@ export interface OutgoingChat {
 
 /** What the agent layer needs from the core. */
 export interface CoreServices {
+  workBrief?: WorkBriefStore;
   toolPolicies: ToolPolicyStore;
   memoir: Memoir;
   bio(): BioStatus;
@@ -438,6 +445,7 @@ export interface CoreServices {
   ): { id: string };
   requestFileSend(ch: string, req: TransferRequest): Promise<Transfer>;
   /** Tell the channel (and the local UI) that my agent is working on a reply to `replyTo`. Best effort. */
+  sendTyping(ch: string, active: boolean): void;
   sendStatus?(ch: string, s: { replyTo: string; state: StatusState; activity?: string }): void;
   listTransfers(ch?: string): Transfer[];
   createInvite(kind: "direct" | "group" | "conversation", name: string, relay?: string): Promise<{ link: string; channel: Channel }>;
@@ -463,6 +471,7 @@ export interface AgentService {
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
+  channelNote?(ch: string, text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   bioChanged?(): Promise<void>;

@@ -42,6 +42,11 @@ async function request(method, path, body) {
 const enc = encodeURIComponent;
 
 export const api = {
+  typing: (ch, active) => { void request("POST", `/api/channels/${ch}/typing`, { active }).catch(() => {}); },
+  workBrief: () => request("GET", "/api/work-brief"),
+  addWorkBrief: item => request("POST", "/api/work-brief", item),
+  patchWorkBrief: (id, patch) => request("PATCH", `/api/work-brief/${enc(id)}`, patch),
+  deleteWorkBrief: id => request("DELETE", `/api/work-brief/${enc(id)}`),
   toolPolicies: (kind, id) => request("GET", policyPath(kind, id)),
   setToolPolicies: (kind, id, rules) => request("PUT", policyPath(kind, id), { rules }),
   memoir: (kind, id, markSeen = false) => request("GET", `/api/${kind === "peer" ? "peers" : "channels"}/${enc(id)}/memoir${markSeen ? "?markSeen=1" : ""}`),
@@ -109,6 +114,18 @@ export const api = {
     xhr.send(file);
   }),
   transferAction: (tid, action) => request("POST", `/api/transfers/${enc(tid)}/${action}`),
+  resetP2p: (ch) => request("POST", "/api/p2p/reset", ch ? { ch } : {}),
+  deleteTransferFile: (tid) => request("DELETE", `/api/transfers/${enc(tid)}/file`),
+  transferDownload: async (tid, name) => {
+    const response = await fetch(`/api/transfers/${enc(tid)}/download`, { headers: { "X-Spencer-Token": token } });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(typeof body?.error === "string" ? body.error : "Download failed");
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a"); link.href = url; link.download = name; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
   transferPreview: (tid) => request("GET", `/api/transfers/${enc(tid)}/preview`),
   mcp: () => request("GET", "/api/mcp"),
   saveMcpServer: (name, config) => request("PUT", `/api/mcp/servers/${encodeURIComponent(name)}`, config),

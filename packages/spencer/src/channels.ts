@@ -245,7 +245,7 @@ export class ChannelManager {
       .filter((m) => m.present)
       .map((m) => ({
         id: m.id,
-        features: safeJsonArray(m.features),
+        features: m.id === me ? this.d.localFeatures?.() ?? [] : safeJsonArray(m.features),
         ...(m.id === me ? { name: this.d.config().name } : m.name ? { name: m.name } : {}),
         fingerprint: fingerprint(m.id),
         me: m.id === me,

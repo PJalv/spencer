@@ -50,6 +50,7 @@ export class Bus {
 }
 
 export interface NodeOptions {
+  p2p?: import("../../src/contracts.ts").TransferP2pAdapter;
   policy?: Partial<Policy>;
   crocInfo?: () => CrocInfo | undefined;
   service?: TransferServiceOptions;
@@ -67,6 +68,7 @@ export class TNode {
   queue: Delivered[] = [];
   events: Transfer[] = [];
   notes: string[] = [];
+  channelNotes: Array<{ ch: string; text: string; untrusted?: boolean }> = [];
   enqueued: FileBody[] = [];
   policy: Policy;
   clock = { offset: 0 };
@@ -96,6 +98,7 @@ export class TNode {
     this.db = new DatabaseSync(this.dbPath);
     const svc = createTransferService(
       {
+        p2p: this.opts.p2p,
         db: this.db,
         dataDir: this.dataDir,
         me: this.id,
@@ -111,6 +114,7 @@ export class TNode {
         peerName: (_ch, peer) => this.bus.nodes.get(peer)?.name,
         crocPath: "/nonexistent/croc",
         events: { emit: (e) => e.type === "transfer" && this.events.push(e.transfer) },
+        channelTransferNote: (ch, text, opts) => { this.channelNotes.push({ ch, text, ...opts }); },
         ownerNote: (t) => this.notes.push(t),
         now: () => this.now(),
       },

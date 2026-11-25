@@ -103,7 +103,10 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
   async function channel(ref: string): Promise<Channel> {
     const { channels } = await state();
     const want = ref.trim().toLowerCase();
-    const found = channels.find((c) => c.id === ref) ?? channels.find((c) => c.name.toLowerCase() === want);
+    const exact = channels.find((c) => c.id === ref);
+    const matches = channels.filter((c) => c.name.toLowerCase() === want);
+    if (!exact && matches.length > 1) throw new ToolError(`ambiguous channel "${ref}". Use an explicit channel ID: ${matches.map(c => c.id).join(", ")}`);
+    const found = exact ?? matches[0];
     if (!found) throw new ToolError(`no channel "${ref}". Channels: ${channels.map((c) => `${c.name} (${c.id})`).join(", ") || "none"}`);
     return found;
   }
@@ -118,7 +121,7 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
     {
       name: "spencer_ask",
       description:
-        "Send a message to Spencer (the owner's always-on agent, which chats with other people's Spencers) in its owner chat and wait for its answer. The message shows in the owner's chat marked as coming from a T3 Code thread.",
+        "Send a message to Spencer (the owner's always-on agent, which chats with other people's Spencers) in its owner chat and wait for its answer. The message is marked as coming from an external agent.",
       inputSchema: {
         type: "object",
         properties: {
@@ -205,6 +208,36 @@ export function spencerTools(dataDir: string, fetchImpl: typeof fetch = fetch): 
         return `Posted in #${c.name} (message ${id}).`;
       },
     },
+    {
+      name: "spencer_publish_update", description: "Publish a work update from any agent or script, optionally notifying the owner without waking the model.",
+      inputSchema: { type: "object", properties: { key: { type: "string" }, title: { type: "string" }, summary: { type: "string" }, status: { type: "string", enum: ["active", "blocked", "done"] }, visibility: { type: "string", enum: ["private", "trusted", "public"] }, project: { type: "string" }, links: { type: "array", items: { type: "string" } }, source: { type: "string" }, notifyOwner: { type: "boolean" }, notifyChannel: { type: "string" }, final: { type: "boolean" } }, required: ["title", "summary"] },
+      run: async a => JSON.stringify(await api("POST", "/api/work-brief", a)),
+    },
+    {
+      name: "spencer_work_brief", description: "Read the owner's work brief.",
+      inputSchema: { type: "object", properties: { status: { type: "string" }, project: { type: "string" } } },
+      run: async a => { const q = new URLSearchParams(); for (const k of ["status", "project"]) { const v = str(a, k); if (v) q.set(k, v); } return JSON.stringify(await api("GET", `/api/work-brief?${q}`)); },
+    },
+    {
+      name: "spencer_read_peer", description: "Read a peer or group profile, including BIO, rules and memoir notes.",
+      inputSchema: { type: "object", properties: { id: { type: "string" }, kind: { type: "string", enum: ["peer", "channel"] } }, required: ["id"] },
+      run: async a => { const kind = str(a, "kind") ?? "peer"; if (kind !== "peer" && kind !== "channel") throw new ToolError("invalid kind"); return JSON.stringify(await api("GET", `/api/${kind === "peer" ? "peers" : "channels"}/${encodeURIComponent(str(a, "id", true))}/memoir`)); },
+    },
+    {
+      name: "spencer_add_memoir_note", description: "Add an owner-scoped note to a peer or group memoir.",
+      inputSchema: { type: "object", properties: { id: { type: "string" }, kind: { type: "string", enum: ["peer", "channel"] }, text: { type: "string" }, pinned: { type: "boolean" } }, required: ["id", "text"] },
+      run: async a => { const kind = str(a, "kind") ?? "peer"; if (kind !== "peer" && kind !== "channel") throw new ToolError("invalid kind"); return JSON.stringify(await api("POST", `/api/${kind === "peer" ? "peers" : "channels"}/${encodeURIComponent(str(a, "id", true))}/notes`, { text: str(a, "text", true), ...(a.pinned === undefined ? {} : { pinned: a.pinned }) })); },
+    },
+    {
+      name: "spencer_send_file", description: "Send a local artifact to a channel.",
+      inputSchema: { type: "object", properties: { channel: { type: "string" }, path: { type: "string" }, to: { type: "string" } }, required: ["channel", "path"] },
+      run: async a => { const c = await channel(str(a, "channel", true)); return JSON.stringify(await api("POST", "/api/transfers", { ch: c.id, path: str(a, "path", true), to: str(a, "to") })); },
+    },
+    {
+      name: "spencer_list_transfers", description: "List incoming and outgoing file transfers.",
+      inputSchema: { type: "object", properties: { channel: { type: "string" } } },
+      run: async a => { const ref = str(a, "channel"); const c = ref ? await channel(ref) : undefined; return JSON.stringify(await api("GET", `/api/transfers${c ? `?ch=${encodeURIComponent(c.id)}` : ""}`)); },
+    },
   ];
 }
 
@@ -212,7 +245,7 @@ export async function runSpencerBridge(dataDir: string): Promise<void> {
   const tools = spencerTools(dataDir);
   await serveStdio(
     "spencer",
-    "Spencer is the owner's always-on agent that chats with other people's Spencers. Ask it things with spencer_ask; read and post in its channels.",
+    "Spencer connects coding agents, CLI tools and scripts with the owner's agent, work brief, channels, memoirs and transfers.",
     () => tools,
   );
 }

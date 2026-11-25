@@ -80,3 +80,26 @@ test("group peer row opens its channel BIO without a DM snippet", async () => {
   assert.match(document.querySelector('[role="dialog"]').textContent, /Channel-specific scope/);
   closeModal(); view.destroy();
 });
+
+test("Work Brief submission preserves in-flight edits and prevents duplicate submits", async () => {
+  api.bio = async () => ({text:"", sharedChannels:[]});
+  api.workBrief = async () => ({items:[]});
+  let finish; const calls = [];
+  api.addWorkBrief = item => { calls.push(item); return new Promise(resolve => { finish = resolve; }); };
+  const main = mount(); const view = bioView(main); await flush();
+  try {
+    const title = main.querySelector('[aria-label="Work title"]');
+    const summary = main.querySelector('[aria-label="Work summary"]');
+    const submit = button(main, "Add work item");
+    title.value = 'submitted title'; summary.value = 'submitted summary';
+    submit.click(); submit.click();
+    assert.equal(submit.disabled, true);
+    assert.equal(calls.length, 1);
+    title.value = 'next title'; summary.value = 'next summary';
+    finish({id:'new'}); await flush();
+    assert.equal(title.value, 'next title'); assert.equal(summary.value, 'next summary');
+    assert.equal(submit.disabled, false);
+    submit.click(); finish({id:'second'}); await flush();
+    assert.equal(title.value, ''); assert.equal(summary.value, '');
+  } finally { view.destroy(); }
+});

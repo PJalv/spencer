@@ -23,7 +23,7 @@ import { Api, tempDir, waitFor } from './harness.ts';
     const data = randomBytes(64 * 1024), path = join(tmp.dir, 'file.bin');
     writeFileSync(path, data);
     const tr = await aa.sendFile(inv.channel.id, path);
-    await aa.transferAction(tr.tid, 'approve');
+    assert.notEqual(tr.state, 'awaiting_approval');
     await waitFor(async () => (await aa.transfer(tr.tid)).state === 'completed' && (await bb.transfer(tr.tid)).state === 'completed', 'transfer', 30000);
     const sent = await aa.transfer(tr.tid), received = await bb.transfer(tr.tid);
     assert.equal(sent.via, 'link'); assert.equal(received.via, 'link');
@@ -43,7 +43,7 @@ import { Api, tempDir, waitFor } from './harness.ts';
     await waitFor(() => a.channels.peerHasFeature(inv.channel.id, b.identity.id, 'p2p-files/1') && b.channels.peerHasFeature(inv.channel.id, a.identity.id, 'p2p-files/1'), 'feature hello');
     const aa = new Api(a.port, a.token), bb = new Api(b.port, b.token);
     const data = randomBytes(5 * 1024 * 1024), path = join(tmp.dir, 'file.bin'); writeFileSync(path, data);
-    const tr = await aa.sendFile(inv.channel.id, path, b.identity.id); await aa.transferAction(tr.tid, 'approve');
+    const tr = await aa.sendFile(inv.channel.id, path, b.identity.id); assert.notEqual(tr.state, 'awaiting_approval');
     await waitFor(async () => (await aa.transfer(tr.tid)).state === 'completed' && (await bb.transfer(tr.tid)).state === 'completed', 'transfer', 30000);
     const sent = await aa.transfer(tr.tid), received = await bb.transfer(tr.tid);
     assert.equal(sent.via, 'link'); assert.equal(received.via, 'link');
@@ -90,7 +90,7 @@ async function scenario(kind: 'threshold' | 'multihub' | 'restart' | 'mode-off' 
     }
     const transfer = async (size: number, via: 'link' | 'croc') => {
       const data = randomBytes(size), path = join(tmp.dir, `file-${size}.bin`); writeFileSync(path, data);
-      const tr = await aa.sendFile(ch, path); await aa.transferAction(tr.tid, 'approve');
+      const tr = await aa.sendFile(ch, path); assert.notEqual(tr.state, 'awaiting_approval');
       await waitFor(async () => (await aa.transfer(tr.tid)).state === 'completed' && (await bb.transfer(tr.tid)).state === 'completed', 'transfer', 30000);
       const sent = await aa.transfer(tr.tid), received = await bb.transfer(tr.tid);
       assert.equal(sent.via, via); assert.equal(received.via, via);

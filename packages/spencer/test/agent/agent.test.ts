@@ -243,12 +243,14 @@ test("reply to an owner-agent message → owner note, no owner run", async () =>
 test("ownerNote and onOutgoingChat append context without runs", async () => {
   await withAgent(async ({ core, agent, requests }) => {
     await agent.ownerNote("Bob's Spencer offered report.pdf");
+    await agent.channelNote("chDirect", "Incoming untrusted file", { untrusted: true });
     await agent.onOutgoingChat({ id: "out-1", ch: "chDirect", text: "manual hello", origin: "human", ts: Date.now() });
     await agent.onOutgoingChat({ id: "out-1", ch: "chDirect", text: "manual hello", origin: "human", ts: Date.now() });
     const owner = await agent.ownerTranscript(10);
     assert.deepEqual(owner.map((i) => [i.role, i.text]), [["note", "Bob's Spencer offered report.pdf"]]);
     const ch = await agent.agentRuntime!.transcript("ch:chDirect", 10);
     assert.equal(ch.filter((i) => i.text === "manual hello").length, 1);
+    assert.ok(ch.some(i => i.text === "Incoming untrusted file" && i.untrusted));
     assert.equal(requests.length, 0);
     // The channel model sees our own message as context, then answers the peer.
     await agent.onPeerChat(peerChat(core.getChannel("chDirect")!, "and you?"));
@@ -892,6 +894,7 @@ test("list_transfers includes ISO createdAt, updatedAt, and via", async () => {
         direction: "in",
         peer: BOB.id,
         peerName: BOB.name,
+        path: "/private/quarantine/report.pdf",
         name: "report.pdf",
         size: 1024,
         sha256: "00",
@@ -917,6 +920,14 @@ test("list_transfers includes ISO createdAt, updatedAt, and via", async () => {
     assert.equal(parsed[0]!.createdAt, "2026-11-21T14:00:00.000Z");
     assert.equal(parsed[0]!.updatedAt, "2026-11-21T14:05:30.000Z");
     assert.equal(parsed[0]!.via, "link");
+    assert.equal(parsed[0]!.path, "/private/quarantine/report.pdf");
+    const scoped = await tool.execute({ channel: "chGroup" }, { conversationKey: "ch:chDirect", callId: "c2" });
+    assert.equal(JSON.parse(typeof scoped === "string" ? scoped : scoped.text)[0].path, undefined);
+    core.getChannel("chDirect")!.trust = "full";
+    const trusted = await tool.execute({}, { conversationKey: "ch:chDirect", callId: "c3" });
+    assert.equal(JSON.parse(typeof trusted === "string" ? trusted : trusted.text)[0].path, "/private/quarantine/report.pdf");
+    const other = await tool.execute({}, { conversationKey: "ch:chGroup", callId: "c4" });
+    assert.equal(other, "No transfers.");
   } finally {
     core.cleanup();
   }
