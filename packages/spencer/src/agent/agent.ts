@@ -1,5 +1,5 @@
 import { compile } from "@earendil-works/pi-schema";
-import { policyParameters } from "./tool-policy.ts";
+import { policyParameters, toolMatches } from "./tool-policy.ts";
 import { clipPeerBio } from "./untrusted.ts";
 /**
  * `SpencerAgent`: the agent layer (PROTOCOL.md §7) behind `AgentService`.
@@ -320,22 +320,26 @@ export class SpencerAgent implements AgentService {
     return (this.mcp?.tools() ?? []).map((t) => {
       const cached = this.audited.get(t.name);
       if (cached && cached.inner === t) return { ...cached.spec, parameters: policyParameters(t.parameters, policies, t.name) };
-      const validator = compile(t.parameters, { unresolvedRefs: "reject" });
+      let validator: ReturnType<typeof compile> | undefined;
+      try { validator = compile(t.parameters, { unresolvedRefs: "reject" }); }
+      catch (e) { this.log(`Warning: cannot locally validate MCP tool ${t.name}: ${e instanceof Error ? e.message : String(e)}. The MCP server will validate its arguments.`); }
       const spec: ToolSpec = {
         name: t.name,
         description: t.description,
         parameters: policyParameters(t.parameters, policies, t.name),
         execute: async (args, ctx) => {
+          args = args ?? {};
           if (ctx.conversationKey.startsWith("ch:")) {
             const id = ctx.conversationKey.slice(3);
             const ch = this.core.getChannel(id);
             if (!ch || (ch.trust !== "full" && !ch.allowedMcpTools?.includes(t.name))) return { isError: true, text: "Policy violation: tool is not enabled for this channel." };
-            const rules = this.core.toolPolicies.active(id, await this.currentAsker(id));
+            const asker = (await this.currentAsker(id)) ?? (ch.kind === "direct" ? ch.members.find(m => !m.me)?.id : undefined);
+            const rules = this.core.toolPolicies.active(id, asker);
             const checked = this.core.toolPolicies.enforce(rules, t.name, args ?? {});
             if ("isError" in checked) return checked;
             args = checked.args;
           }
-          if (!validator.check(args)) return { isError: true, text: `Invalid tool arguments: ${JSON.stringify(validator.errors(args))}` };
+          if (validator && !validator.check(args)) return { isError: true, text: `Invalid tool arguments: ${JSON.stringify(validator.errors(args))}` };
           const out = await t.execute(args, ctx);
           if (ctx.conversationKey.startsWith("ch:")) {
             const ch = this.core.getChannel(ctx.conversationKey.slice(3));
@@ -368,7 +372,8 @@ export class SpencerAgent implements AgentService {
 
   private async configureChannel(ch: Channel): Promise<void> {
     const allowed = new Set(ch.allowedMcpTools ?? []);
-    const policies = this.core.toolPolicies.active(ch.id);
+    const dmPeer = ch.kind === "direct" ? ch.members.find(m => !m.me)?.id : undefined;
+    const policies = this.core.toolPolicies.active(ch.id, dmPeer);
     const mcpTools = this.mcpTools().filter(t =>
       (ch.trust === "full" || allowed.has(t.name)) && this.core.toolPolicies.effect(policies, t.name) !== "deny",
     );
@@ -583,7 +588,16 @@ export class SpencerAgent implements AgentService {
     const me = this.core.me();
     const full = ch.trust === "full";
     const guardrails = [...this.core.toolPolicies.active(ch.id), ...ch.members.filter(m => !m.me).flatMap(m => this.core.toolPolicies.list({ scopeKind: "peer", scopeId: m.id }))];
-    const summaries = guardrails.map(r => `- ${r.toolPattern} (${r.scopeKind}:${r.scopeId}): ${r.effect}; defaults ${JSON.stringify(r.argDefaults ?? {})}; locked ${JSON.stringify(r.argLocks ?? {})}; allowed ${JSON.stringify(r.argAllowValues ?? {})}`);
+    const summaries = ch.mode === "conversation" || !mcpToolNames.length ? [] : guardrails
+      .filter(r => mcpToolNames.some(name => toolMatches(r.toolPattern, name)))
+      .map(r => {
+        const clauses = [`- ${r.toolPattern} (${r.scopeKind}:${r.scopeId}): ${r.effect}`];
+        for (const [label, values] of [["defaults", r.argDefaults], ["locked", r.argLocks], ["allowed", r.argAllowValues]] as const) {
+          if (values && Object.keys(values).length) clauses.push(`${label} ${JSON.stringify(values)}`);
+        }
+        if (r.note) clauses.push(`note: ${r.note}`);
+        return clauses.join("; ");
+      });
     const grouped = new Map<string, string[]>();
     for (const name of mcpToolNames) {
       const server = name.startsWith("mcp__") ? name.split("__")[1]! : "other";
@@ -618,8 +632,7 @@ export class SpencerAgent implements AgentService {
           ]),
       "",
       ...(ch.mode === "conversation" ? [] : [...this.bioScope(true), ...this.memoirInstructions(ch, true)]),
-      "Active tool guardrails (peer policies apply when that peer is the asker; strictest effect and all constraints apply):",
-      ...summaries,
+      ...(summaries.length ? ["Active tool guardrails (peer policies apply when that peer is the asker; strictest effect and all constraints apply):", ...summaries] : []),
       "Your tools:",
       "- notify_owner: tell your owner something they should know (no action needed from them).",
       "- ask_owner: ask your owner to approve a task you cannot or should not do yourself.",

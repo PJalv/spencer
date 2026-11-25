@@ -195,3 +195,28 @@ test("runtime: notes written with data.untrusted come back as OwnerItem.untruste
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('shared tools keep object schemas and refresh structurally changed parameters', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spencer-rt-schema-'));
+  const db = new DatabaseSync(':memory:'); const requests: FakeRequestInfo[] = [];
+  const rt = await openRuntime(dir,db,requests);
+  const tool = (required: boolean): ToolSpec => ({name:'list_peers',description:'schema regression',parameters:{type:'object',properties:{text:{type:'string'}},...(required?{required:['text']}:{})},async execute(){return 'ok';}});
+  const invoke = async (id:string) => {
+    const sid = await rt.submitInput(OWNER_KEY,{content:'/peers',requestId:id});
+    await rt.waitAnswer(sid);
+    const schema = requests.at(-1)!.toolSchemas.find(t=>t.name==='list_peers')!.parameters;
+    assert.equal(Reflect.get(schema,'type'),'object');
+    assert.equal(Object.hasOwn(schema,'anyOf'),false);
+    return schema;
+  };
+  try {
+    await rt.configure(OWNER_KEY,{tools:[tool(false)],instructions:'owner'});
+    await rt.configure('ch:one',{tools:[tool(false)],instructions:'channel'});
+    await rt.configure('ch:two',{tools:[tool(false)],instructions:'channel'});
+    assert.equal(Object.hasOwn(await invoke('schema-1'),'required'),false);
+    await rt.configure('ch:one',{tools:[tool(true)],instructions:'channel updated'});
+    assert.deepEqual(Reflect.get(await invoke('schema-2'),'required'),['text']);
+    await rt.configure('ch:one',{tools:[tool(false)],instructions:'channel restored'});
+    assert.equal(Object.hasOwn(await invoke('schema-3'),'required'),false);
+  } finally {await rt.close();db.close();rmSync(dir,{recursive:true,force:true});}
+});

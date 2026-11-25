@@ -48,3 +48,20 @@ test('rejects pollution, malformed and oversized policies atomically', () => {
   assert.throws(()=>store.list({scopeKind:'global',scopeId:'bad'}));
  } finally {db.close();}
 });
+
+test('dot paths are validated independently from JSON value keys', () => {
+  const db = new DatabaseSync(':memory:'); const store = new ToolPolicyStore(db);
+  try {
+    const value = { '.gitignore': 'dist/', '': 'empty key', 'literal.dot': 'value' };
+    const rules = store.replace(global, [{toolPattern:'*',effect:'allow',argDefaults:{files:value},argLocks:{headers:value},argAllowValues:{headers:[value]}}]);
+    assert.deepEqual(store.enforce(rules,tool,{files:value}), {args:{files:value,headers:value}});
+    for (const path of ['', '.hidden', 'a..b', 'a.', 'a.__proto__.x', 'constructor']) {
+      for (const field of ['argDefaults','argLocks','argAllowValues']) assert.throws(()=>store.replace(global,[{toolPattern:'*',effect:'allow',[field]:{[path]:field==='argAllowValues'?[value]:value}}]));
+    }
+    for (const key of ['__proto__','constructor','prototype']) {
+      const unsafe = JSON.parse(`{"files":{"${key}":{}}}`);
+      assert.equal('isError' in store.enforce(rules,tool,unsafe),true);
+      assert.throws(()=>store.replace(global,[{toolPattern:'*',effect:'allow',argDefaults:{files:unsafe}}]));
+    }
+  } finally {db.close();}
+});

@@ -270,6 +270,8 @@ export class PiRuntime implements AgentRuntime {
 
   async configure(key: string, setup: ConversationSetup): Promise<void> {
     const conv = await this.conversation(key);
+    // The latest setup supplies the shared superset schema for each tool.
+    this.keySpecs.delete(key);
     this.keySpecs.set(key, setup.tools);
     this.allowed.set(key, new Set(setup.tools.map((t) => t.name)));
     this.reinstall();
@@ -306,24 +308,13 @@ export class PiRuntime implements AgentRuntime {
   /** Rebuild the "spencer" extension from the union of every conversation's tools; replaces it in place. */
   private reinstall(): void {
     const union = new Map<string, ToolSpec>();
-    const schemas = new Map<string, Set<object>>();
-    for (const list of this.keySpecs.values()) for (const t of list) {
-      union.set(t.name, t);
-      const variants = schemas.get(t.name) ?? new Set<object>();
-      variants.add(t.parameters);
-      schemas.set(t.name, variants);
-    }
-    // Registrations are shared. Accept each conversation's schema here; the
-    // tool wrapper validates the original MCP schema after policy injection.
-    for (const [name, variants] of schemas) if (variants.size > 1) {
-      union.set(name, { ...union.get(name)!, parameters: { anyOf: [...variants] } });
-    }
+    for (const list of this.keySpecs.values()) for (const t of list) union.set(t.name, t);
     let changed = union.size !== this.specs.size;
     for (const [name, spec] of union) {
       const previous = this.specs.get(name);
       if (previous !== spec) changed = true;
       this.specs.set(name, spec);
-      if (!this.registrations.has(name) || this.registrations.get(name)!.description !== spec.description || previous?.parameters !== spec.parameters) {
+      if (!this.registrations.has(name) || this.registrations.get(name)!.description !== spec.description || JSON.stringify(previous?.parameters) !== JSON.stringify(spec.parameters)) {
         this.registrations.set(name, this.toRegistration(spec));
         changed = true;
       }

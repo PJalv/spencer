@@ -13,7 +13,7 @@ function object(v: unknown): v is Record<string, unknown> { return v !== null &&
 function safe(v: unknown): void {
   if (Array.isArray(v)) { v.forEach(safe); return; }
   if (object(v)) for (const [k, x] of Object.entries(v)) {
-    if (k.split('.').some(p => forbidden.has(p) || !p)) throw new Error('Invalid policy argument path');
+    if (forbidden.has(k)) throw new Error('Forbidden prototype key');
     safe(x);
   }
 }
@@ -30,7 +30,11 @@ export function parsePolicies(value: unknown, scope: ToolPolicyScope): ToolPolic
     const fields = new Set(['id', 'scopeKind', 'scopeId', 'toolPattern', 'effect', 'argDefaults', 'argLocks', 'argAllowValues', 'note', 'updatedAt']);
     if (Object.keys(r).some(k => !fields.has(k))) throw new Error('Unknown policy field');
     for (const key of ['argDefaults', 'argLocks', 'argAllowValues']) {
-      if (r[key] !== undefined && !object(r[key])) throw new Error(`Invalid ${key}`);
+      const fields = r[key];
+      if (fields !== undefined && !object(fields)) throw new Error(`Invalid ${key}`);
+      if (object(fields)) for (const path of Object.keys(fields)) {
+        if (path.split('.').some(p => !p || forbidden.has(p))) throw new Error('Invalid policy argument path');
+      }
     }
     if (object(r.argAllowValues) && Object.values(r.argAllowValues).some(v => !Array.isArray(v))) throw new Error('Allow-values must be arrays');
     if (r.note !== undefined && (typeof r.note !== 'string' || r.note.length > 2000)) throw new Error('Invalid policy note');

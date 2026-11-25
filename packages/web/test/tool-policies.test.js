@@ -22,3 +22,22 @@ test('guardrails editor loads, edits, adds and removes generic rule constraints'
  assert.match(root.textContent,/Guardrails saved/);
  root.remove();
 });
+
+test('blank and empty JSON maps are omitted while nonempty constraints survive', async () => {
+ api.toolPolicies=async()=>({rules:[{toolPattern:'*',effect:'allow'}]});
+ let saved;
+ api.setToolPolicies=async(_kind,_id,rules)=>{saved=rules;return {rules};};
+ const root=toolGuardrails('channel','room');document.body.append(root);await flush();
+ root.querySelector('[aria-label="argDefaults"]').value=' \n ';
+ root.querySelector('[aria-label="argLocks"]').value='{}';
+ root.querySelector('[aria-label="argAllowValues"]').value='{"project":["one"]}';
+ [...root.querySelectorAll('button')].find(b=>b.textContent==='Save guardrails').click();await flush();
+ assert.deepEqual(saved,[{toolPattern:'*',effect:'allow',argAllowValues:{project:['one']}}]);root.remove();
+});
+test('load errors replace the loading status and keep save disabled', async () => {
+ api.toolPolicies=async()=>{throw new Error('offline');};
+ const root=toolGuardrails('peer','bob');document.body.append(root);await flush();
+ assert.match(root.textContent,/Could not load guardrails: offline/);
+ assert.doesNotMatch(root.textContent,/Loading…/);
+ assert.ok([...root.querySelectorAll('button')].find(b=>b.textContent==='Save guardrails').disabled);root.remove();
+});

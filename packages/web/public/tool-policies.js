@@ -17,7 +17,7 @@ export function toolGuardrails(kind, id) {
       row.append(h('label', null, key + ' (JSON object)', json[key]));
     }
     row.append(h('button.btn', { type: 'button', on: { click: () => row.remove() } }, 'Remove rule'));
-    row.policy = () => ({ ...(rule.id ? { id: rule.id } : {}), ...(rule.note ? { note: rule.note } : {}), toolPattern: pattern.value, effect: effect.value, ...Object.fromEntries(Object.entries(json).map(([k, el]) => [k, JSON.parse(el.value)])) });
+    row.policy = () => ({ ...(rule.id ? { id: rule.id } : {}), ...(rule.note ? { note: rule.note } : {}), toolPattern: pattern.value, effect: effect.value, ...Object.fromEntries(Object.entries(json).map(([k, el]) => [k, JSON.parse(el.value.trim() || '{}')]).filter(([, value]) => value === null || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length)) });
     rows.append(row);
   }
   const save = h('button.btn', { type: 'button', disabled: true, on: { click: () => attempt(async () => {
@@ -27,6 +27,14 @@ export function toolGuardrails(kind, id) {
   }) } }, 'Save guardrails');
   const addButton = h('button.btn', { type: 'button', disabled: true, on: { click: () => add() } }, 'Add rule');
   const section = h('section', null, h('h3', null, 'Tool guardrails'), h('p.hint', null, 'Rules narrow tool access, including Full Trust. Peer rules apply when this peer asks in a DM or group. The strictest effect and all argument constraints apply.'), rows, addButton, save, status);
-  void attempt(async () => { const result = await api.toolPolicies(kind, id); result.rules.forEach(add); loaded = true; save.disabled = false; addButton.disabled = false; status.textContent = ''; });
+  void attempt(async () => {
+    try {
+      const result = await api.toolPolicies(kind, id);
+      result.rules.forEach(add); loaded = true; save.disabled = false; addButton.disabled = false; status.textContent = '';
+    } catch (err) {
+      status.textContent = `Could not load guardrails: ${err instanceof Error ? err.message : String(err)}`;
+      throw err;
+    }
+  });
   return section;
 }
