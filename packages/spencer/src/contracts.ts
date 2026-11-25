@@ -1,3 +1,4 @@
+import type { ToolPolicyStore } from "./agent/tool-policy.ts";
 import type { Memoir } from "./memoir.ts";
 /**
  * Internal contracts between the parts of the Spencer daemon.
@@ -240,6 +241,7 @@ export interface McpServerStatus {
 // ---------------------------------------------------------------- events
 
 export type DaemonEvent =
+  | { type: "tool_policies"; scopeKind: "global" | "peer" | "channel"; scopeId: string }
   | { type: "memoir"; scopeKind: "peer" | "channel"; scopeId: string }
   | { type: "bio"; bio: BioStatus }
   | { type: "peer_bio"; ch: string; id: string; about: string | null; aboutAt: number | null }
@@ -394,6 +396,7 @@ export interface OutgoingChat {
 
 /** What the agent layer needs from the core. */
 export interface CoreServices {
+  toolPolicies: ToolPolicyStore;
   memoir: Memoir;
   bio(): BioStatus;
   bioText(): string;

@@ -1,3 +1,4 @@
+import { toolGuardrails } from "./tool-policies.js";
 import { h } from "./dom.js";
 import { api, attempt } from "./api.js";
 import { markdown } from "./md.js";
@@ -131,19 +132,20 @@ export function memoirModal(kind, id, ch) {
         "h3",
         null,
         kind === "peer"
-          ? "Your RULES.md (DM only)"
+          ? "Your RULES.md (DMs and groups)"
           : "Your RULES.md (group only)",
       ),
       h(
         "p.hint",
         null,
         kind === "peer"
-          ? "Applies only in your 1:1 DM. Advisory when Owner coding tools or Full Trust filesystem/T3 MCP tools can access the data folder."
-          : "Applies only in this group. Advisory when Owner coding tools or Full Trust filesystem/T3 MCP tools can access the data folder.",
+          ? "Applies in 1:1 DMs and when this peer speaks in groups. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder."
+          : "Applies only in this group. Advisory when Owner coding tools or Full Trust filesystem/MCP tools can access the data folder.",
       ),
       rules,
       count,
       h("div", null, save, revert),
+      ...(kind === "peer" ? [toolGuardrails("peer", id)] : []),
       h("h3", null, "Memoir Notes"),
       h(
         "p.hint",

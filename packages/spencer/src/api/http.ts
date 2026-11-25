@@ -1,3 +1,4 @@
+import { validateScope, type ToolPolicyScope } from "../agent/tool-policy.ts";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
@@ -490,6 +491,25 @@ export class ApiServer {
       const agent = b.agent();
       if (!agent.decideRequest) throw new HttpError(404, "requests are not supported");
       return await agent.decideRequest(m[1]!, m[2] === "approve");
+    }
+
+    const policyRoute = /^\/api\/(?:tool-policies\/(global)|(channels|peers)\/([^/]+)\/tool-policies)$/.exec(p);
+    if (policyRoute && (method === "GET" || method === "PUT")) {
+      const scope: ToolPolicyScope = policyRoute[1] ? { scopeKind: "global", scopeId: "*" } : { scopeKind: policyRoute[2] === "channels" ? "channel" : "peer", scopeId: policyRoute[3]! };
+      try { validateScope(scope); } catch (e) { throw new HttpError(400, String(e)); }
+      if (scope.scopeKind === "channel" && !b.core.getChannel(scope.scopeId)) throw new HttpError(404, "unknown channel");
+      if (scope.scopeKind === "peer" && !b.core.listPeerDirectory().some(peer => peer.id === scope.scopeId)) throw new HttpError(404, "unknown peer");
+      if (method === "GET") return { rules: b.core.toolPolicies.list(scope) };
+      let rules;
+      try {
+        const body = await readJson(req);
+        if (Object.keys(body).some(k => k !== "rules")) throw new Error("Expected only a rules field");
+        rules = b.core.toolPolicies.replace(scope, body.rules);
+      }
+      catch (e) { throw new HttpError(400, e instanceof Error ? e.message : "Invalid policies"); }
+      b.events.emit({ type: "tool_policies", ...scope });
+      for (const ch of b.core.listChannels()) if (scope.scopeKind === "global" || (scope.scopeKind === "channel" ? ch.id === scope.scopeId : ch.members.some(m => !m.me && m.id === scope.scopeId))) await b.agent().channelChanged(ch.id);
+      return { rules };
     }
 
     if (p === "/api/bio") {

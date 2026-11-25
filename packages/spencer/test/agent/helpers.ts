@@ -1,3 +1,4 @@
+import { ToolPolicyStore } from "../../src/agent/tool-policy.ts";
 import { Memoir } from "../../src/memoir.ts";
 /** Test helpers: an in-memory stub of `CoreServices` and small waiting utilities. */
 import { DatabaseSync } from "node:sqlite";
@@ -93,6 +94,7 @@ export function makeCore(opts: { dir?: string; channels?: Channel[]; config?: Pa
     peerBios: () => [],
     listPeerDirectory: () => [],
     dir,
+    toolPolicies: new ToolPolicyStore(db),
     db,
     dataDir: dir,
     cfg,

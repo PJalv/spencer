@@ -28,6 +28,7 @@ const mount = () => {
   document.body.innerHTML = '<div id="modal-root"></div><main></main>';
   return document.querySelector("main");
 };
+api.toolPolicies = async () => ({ rules: [] });
 let profile;
 api.memoir = async (kind, id, mark) => {
   if (mark) profile.notes.forEach((n) => (n.seen = true));
@@ -95,7 +96,7 @@ test("Peer Card safely renders BIO and notes, marks seen, validates byte count a
   assert.equal(dialog.querySelector("system"), null);
   assert.match(
     dialog.textContent,
-    /DM only[\s\S]*1:1 DM[\s\S]*Advisory[\s\S]*Memoir Notes[\s\S]*Agent/,
+    /DMs and groups[\s\S]*1:1 DM[\s\S]*Advisory[\s\S]*Memoir Notes[\s\S]*Agent/,
   );
   assert.equal(profile.notes[0].seen, true);
   const rules = dialog.querySelector("textarea");

@@ -166,6 +166,23 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     const ch = channel.id;
     await waitFor(() => A.daemon.core.getChannel(ch)!.members.length === 2, "joined");
 
+    // Tool policy API shares validation across all scopes and refreshes immediately.
+    const policyPeer = A.daemon.core.getChannel(ch)!.members.find(m => !m.me)!.id;
+    for (const path of ["/api/tool-policies/global", `/api/channels/${ch}/tool-policies`, `/api/peers/${policyPeer}/tool-policies`]) {
+      assert.deepEqual((await http(port, "GET", path, {headers:H})).json(), {rules:[]});
+      const changedBefore = A.agent().changed.length;
+      const put = await http(port, "PUT", path, {headers:H, body:{rules:[{toolPattern:"mcp__any__*",effect:"ask_owner",argLocks:{"selection.model":"chosen"}}]}});
+      assert.equal(put.status,200,put.text);
+      assert.equal(put.json().rules.length,1);
+      assert.ok(A.agent().changed.length > changedBefore);
+      for (const rule of [{toolPattern:"*",effect:"bad"},{toolPattern:"x".repeat(129),effect:"deny"},JSON.parse('{"toolPattern":"*","effect":"allow","argLocks":{"x.__proto__.bad":1}}'),{toolPattern:"*",effect:"allow",argDefaults:{x:"a".repeat(66000)}}]) {
+        assert.equal((await http(port,"PUT",path,{headers:H,body:{rules:[rule]}})).status,400);
+      }
+      assert.equal((await http(port,"GET",path,{headers:H})).json().rules[0].effect,"ask_owner");
+    }
+    assert.equal((await http(port,"GET","/api/channels/bad.scope/tool-policies",{headers:H})).status,400);
+    await waitFor(() => events.some(e => e.type === "tool_policies" && e.scopeKind === "peer" && e.scopeId === policyPeer), "policy WS event");
+
     // --- channel message
     const pm = await http(port, "POST", `/api/channels/${ch}/messages`, { headers: H, body: { text: "hi from http" } });
     assert.equal(pm.status, 200);

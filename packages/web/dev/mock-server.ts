@@ -1,3 +1,4 @@
+import { parsePolicies, validateScope, type ToolPolicy, type ToolPolicyScope } from "../../spencer/src/agent/tool-policy.ts";
 /**
  * Standalone dev server for the Spencer web UI.
  *
@@ -555,11 +556,11 @@ setInterval(() => setPresence(carol, !presence.get(carol.id)!.online), 40_000).u
 // One relay blip so the connection dot can be seen changing.
 later(60_000, () => {
   relay.connected = false;
-  emit({ type: "relay", url: relay.url, connected: false });
+  emit({ type: "relay", url: relay.url, connected: false, state: "waiting", since: Date.now(), features: [] });
   setPresence(dave, false);
   later(6_000, () => {
     relay.connected = true;
-    emit({ type: "relay", url: relay.url, connected: true });
+    emit({ type: "relay", url: relay.url, connected: true, state: "connected", since: Date.now(), features: [] });
     setPresence(dave, true);
   });
 });
@@ -686,8 +687,9 @@ function transferAction(t: Transfer, action: string): Transfer {
   return t;
 }
 
+const toolPolicies = new Map<string, ToolPolicy[]>();
 const memoirRules = new Map<string, string>();
-const memoirNotes = new Map<string, {id:string; scopeKind:string; scopeId:string; text:string; pinned:boolean; seen:boolean; author:string; trustAtWrite:string; createdAt:number}[]>();
+const memoirNotes = new Map<string, {id:string; scopeKind:"peer" | "channel"; scopeId:string; text:string; pinned:boolean; seen:boolean; author:string; trustAtWrite:string; createdAt:number}[]>();
 function evictMockNotes(key: string) {
   const list = memoirNotes.get(key) ?? [];
   const pinned = list.filter((n) => n.pinned);
@@ -721,6 +723,23 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
   const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["api", ...]
   const [, a, b, c, d] = parts;
 
+  if ((a === "tool-policies" && b === "global" && parts.length === 3) || ((a === "peers" || a === "channels") && b && c === "tool-policies" && parts.length === 4)) {
+    const scope: ToolPolicyScope = a === "tool-policies" ? { scopeKind: "global", scopeId: "*" } : { scopeKind: a === "peers" ? "peer" : "channel", scopeId: b! };
+    try { validateScope(scope); } catch (e) { throw new HttpError(400, String(e)); }
+    if (scope.scopeKind === "peer") memoirProfile("peer", scope.scopeId);
+    if (scope.scopeKind === "channel" && !channels.has(scope.scopeId)) throw new HttpError(404, "unknown channel");
+    const key = `${scope.scopeKind}:${scope.scopeId}`;
+    if (method === "GET") return { rules: toolPolicies.get(key) ?? [] };
+    if (method === "PUT") {
+      try {
+        const body = await readJson(req);
+        if (Object.keys(body).some(k => k !== "rules")) throw new Error("Expected only a rules field");
+        const rules = parsePolicies(body.rules, scope);
+        if (new Set(rules.map(r => r.id)).size !== rules.length) throw new Error("Duplicate policy id");
+        toolPolicies.set(key, rules); emit({ type: "tool_policies", ...scope }); return { rules };
+      } catch (e) { throw new HttpError(400, e instanceof Error ? e.message : "Invalid policies"); }
+    }
+  }
   if (a === "peers" && b && c === "memoir" && d === "seen" && parts.length === 5 && method === "POST") {
     const profile = memoirProfile("peer", b);
     profile.notes.forEach((n) => (n.seen = true));
@@ -743,7 +762,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       const body=await readJson(req);
       if(typeof body.text !== "string" || !body.text.trim() || body.text.trim().length>500) throw new HttpError(400,"note must contain 1 to 500 characters");
       if(body.pinned !== undefined && typeof body.pinned !== "boolean") throw new HttpError(400,"pinned must be boolean");
-      const note={id:b64u(16),scopeKind:kind,scopeId:b,text:body.text.trim(),pinned:body.pinned===true,seen:true,author:"owner",trustAtWrite:"owner",createdAt:Date.now()};
+      const note: (typeof profile.notes)[number] = {id:b64u(16),scopeKind:kind,scopeId:b,text:body.text.trim(),pinned:body.pinned===true,seen:true,author:"owner",trustAtWrite:"owner",createdAt:Date.now()};
       memoirNotes.set(key,[note,...profile.notes]);
       evictMockNotes(key);
       emit({type:"memoir",scopeKind:kind,scopeId:b});return note;
@@ -1278,7 +1297,7 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     sockets.add(ws);
     ws.on("close", () => sockets.delete(ws));
-    ws.send(JSON.stringify({ type: "relay", url: relay.url, connected: relay.connected } satisfies DaemonEvent));
+    ws.send(JSON.stringify({ type: "relay", url: relay.url, connected: relay.connected, state: relay.connected ? "connected" : "waiting", since: Date.now(), features: [] } satisfies DaemonEvent));
     if (ownerBusy) ws.send(JSON.stringify({ type: "owner_busy", busy: true } satisfies DaemonEvent));
     for (const e of working.values()) ws.send(JSON.stringify(e));
   });

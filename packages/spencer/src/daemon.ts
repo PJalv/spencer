@@ -1,3 +1,4 @@
+import { ToolPolicyStore } from "./agent/tool-policy.ts";
 import { Memoir } from "./memoir.ts";
 import { readBio, writeBio } from "./bio.ts";
 import { MAX_ABOUT } from "@spencer/protocol";
@@ -560,6 +561,7 @@ export class Daemon {
       refresh: ch => { void this.s.agent?.channelChanged(ch).catch(e => log(`memoir refresh: ${e.message}`)); } });
     return {
       memoir,
+      toolPolicies: new ToolPolicyStore(this.need("db")),
       db: this.need("db"),
       dataDir: this.dataDir,
       config: () => this.need("cfg"),

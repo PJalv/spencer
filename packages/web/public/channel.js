@@ -1,3 +1,4 @@
+import { toolGuardrails } from "./tool-policies.js";
 import { groupMemoirSnippet } from "./memoir.js";
 // A channel (direct or group): the transcript between people and their Spencers, composer, members, files and settings.
 import { peerCard, peerBioSnippet } from "./peers.js";
@@ -483,7 +484,7 @@ function settingsModal(c) {
   const modal = openModal({
     title: `${channelTitle(c)} settings`,
     wide: true,
-    body: [form, leaveArea],
+    body: [form, toolGuardrails("channel", c.id), leaveArea],
     footer: [h("button.btn", { type: "button", on: { click: () => modal.close() } }, "Cancel"), saveBtn],
   });
   renderTools();

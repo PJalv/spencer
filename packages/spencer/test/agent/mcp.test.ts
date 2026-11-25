@@ -5,7 +5,7 @@ import { McpManager, mcpToolName } from "../../src/agent/mcp.ts";
 import { SpencerAgent } from "../../src/agent/agent.ts";
 import type { FakeRequestInfo } from "../../src/agent/fake-brain.ts";
 import type { DaemonEvent } from "../../src/contracts.ts";
-import { CHANNEL_TOOLS, channel, makeCore, peerChat, waitFor } from "./helpers.ts";
+import { CHANNEL_TOOLS, ME, channel, makeCore, peerChat, waitFor } from "./helpers.ts";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/echo-mcp-server.ts", import.meta.url));
 const ECHO = { command: process.execPath, args: [FIXTURE] };
@@ -239,4 +239,31 @@ test("HTTP connection errors report status and redact credentials", async () => 
     await mgr.stop();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('Full Trust policies gate real MCP calls, apply peer locks in groups, and leave owner unrestricted', async () => {
+  const core = makeCore({channels:[channel('guarded','group','Guarded',{trust:'full'}), channel('unrelated','direct','Unrelated',{trust:'full'})], config:{mcpServers:{echo:ECHO}}});
+  const peer = core.getChannel('guarded')!.members.find(m=>!m.me)!;
+  const requests: FakeRequestInfo[]=[];
+  const agent = new SpencerAgent(core,{fakeHooks:{onRequest:r=>requests.push(r)},log(){}});
+  try {
+    await agent.start(); await agent.mcpSettled();
+    core.toolPolicies.replace({scopeKind:'channel',scopeId:'guarded'},[
+      {toolPattern:'*pid',effect:'deny'}, {toolPattern:'*fail',effect:'ask_owner'},
+      {toolPattern:'*echo',effect:'allow',argDefaults:{text:'injected'},argLocks:{provider:'codex','modelSelection.model':'chosen'},argAllowValues:{projectId:['spencer']}}
+    ]);
+    core.toolPolicies.replace({scopeKind:'peer',scopeId:peer.id},[{toolPattern:'*echo',effect:'allow',argLocks:{model:'peer-model'}}]);
+    await agent.channelChanged('guarded');
+    const offered=await agent.agentRuntime!.offeredTools('ch:guarded');
+    assert.ok(!offered.includes('mcp__echo__pid')); assert.ok(offered.includes('mcp__echo__echo'));
+    const call=async(tool:string,args:unknown)=>{await agent.onPeerChat(peerChat(core.getChannel('guarded')!,`please call mcp__echo__${tool} ${JSON.stringify(args)}`, {mentions:[ME.id]})); await agent.idle(); return core.sent.at(-1)!.text;};
+    assert.match(await call('fail',{}),/Policy violation:.*ask_owner/);
+    assert.match(await call('echo',{projectId:'spencer'}),/echo: injected/);
+    assert.match(await call('echo',{projectId:'other'}),/Policy violation:.*projectId/);
+    assert.match(await call('echo',{projectId:'spencer',model:'wrong'}),/Policy violation:.*model/);
+    assert.match(await call('echo',{projectId:'spencer',provider:'wrong'}),/Policy violation:.*provider/);
+    assert.ok(requests.some(r=>r.systemPrompt.includes('modelSelection.model')&&r.systemPrompt.includes('peer-model')));
+    await agent.ownerSend('/tool mcp__echo__pid {}'); await agent.idle();
+    assert.match((await agent.ownerTranscript(1))[0].text,/done: \d+/);
+  } finally {await agent.stop(); core.cleanup();}
 });

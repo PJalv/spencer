@@ -306,12 +306,24 @@ export class PiRuntime implements AgentRuntime {
   /** Rebuild the "spencer" extension from the union of every conversation's tools; replaces it in place. */
   private reinstall(): void {
     const union = new Map<string, ToolSpec>();
-    for (const list of this.keySpecs.values()) for (const t of list) union.set(t.name, t);
+    const schemas = new Map<string, Set<object>>();
+    for (const list of this.keySpecs.values()) for (const t of list) {
+      union.set(t.name, t);
+      const variants = schemas.get(t.name) ?? new Set<object>();
+      variants.add(t.parameters);
+      schemas.set(t.name, variants);
+    }
+    // Registrations are shared. Accept each conversation's schema here; the
+    // tool wrapper validates the original MCP schema after policy injection.
+    for (const [name, variants] of schemas) if (variants.size > 1) {
+      union.set(name, { ...union.get(name)!, parameters: { anyOf: [...variants] } });
+    }
     let changed = union.size !== this.specs.size;
     for (const [name, spec] of union) {
-      if (this.specs.get(name) !== spec) changed = true;
+      const previous = this.specs.get(name);
+      if (previous !== spec) changed = true;
       this.specs.set(name, spec);
-      if (!this.registrations.has(name) || this.registrations.get(name)!.description !== spec.description) {
+      if (!this.registrations.has(name) || this.registrations.get(name)!.description !== spec.description || previous?.parameters !== spec.parameters) {
         this.registrations.set(name, this.toRegistration(spec));
         changed = true;
       }
