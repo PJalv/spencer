@@ -112,6 +112,18 @@ export const api = {
     xhr.send(file);
   }),
   transferAction: (tid, action) => request("POST", `/api/transfers/${enc(tid)}/${action}`),
+  resetP2p: (ch) => request("POST", "/api/p2p/reset", ch ? { ch } : {}),
+  deleteTransferFile: (tid) => request("DELETE", `/api/transfers/${enc(tid)}/file`),
+  transferDownload: async (tid, name) => {
+    const response = await fetch(`/api/transfers/${enc(tid)}/download`, { headers: { "X-Spencer-Token": token } });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(typeof body?.error === "string" ? body.error : "Download failed");
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a"); link.href = url; link.download = name; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
   transferPreview: (tid) => request("GET", `/api/transfers/${enc(tid)}/preview`),
   mcp: () => request("GET", "/api/mcp"),
   saveMcpServer: (name, config) => request("PUT", `/api/mcp/servers/${encodeURIComponent(name)}`, config),

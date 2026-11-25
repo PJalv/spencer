@@ -246,14 +246,21 @@ stale status), and an older Spencer ignores the unknown `eph` frame (it just doe
 Files use a direct link or croc, in both direct and group channels. Files never go through the message relay. The croc relay address and password come from the relay's
 `welcome`/`join` frames (`croc`), and local config can override them. Pinned croc: **v10.3.1**.
 
+Browser uploads stream into private staging while computing SHA-256, then move into outgoing storage. Channel uploads allow 256 MiB per file and 512 MiB per composer batch; owner attachments retain their 25 MiB limit. Human owner sends skip approval, including Standard channels. Agent sends retain the channel trust and policy checks.
+
+Incoming completion appends an untrusted context note to the channel without starting a run. Channel `list_transfers` is scoped to that channel; only Full trust exposes incoming quarantine paths. Incoming file contents remain untrusted data.
+
+The crash marker records only handshakes. Verified steady-state links do not arm the crash breaker. Without a croc relay, unavailable direct links produce a diagnostic reason and bounded exponential retries, followed by `file_cancel` on exhaustion.
+
 ### 6.1 Sender states
 `awaiting_approval → offered → sending → completed`
 Terminal: `completed | denied | declined | failed | expired | cancelled`
 
 1. **Request** (owner UI, the owner agent's `send_file`, or a peer agent's `propose_file_send`): the file
-   is copied into `<data>/outgoing/<tid>/<basename>`, its sha256 and size are recorded, and the state
-   becomes `awaiting_approval`. With `policy.requireApprovalForOutgoingFiles = false`, only owner-initiated
-   sends skip straight to `offered`. Peer-initiated sends **always** need approval.
+   is staged in `<data>/outgoing/<tid>/<basename>`, and its SHA-256 and size are recorded.
+   Human owner sends and Full-trust channel sends become `offered` immediately.
+   In Standard channels, peer-agent sends require approval. Owner-agent sends require approval when
+   `policy.requireApprovalForOutgoingFiles` is enabled. These sends become `awaiting_approval`.
 2. **Approve**: enqueue `file_offer` (expires in 24 h by default) → `offered`. **Deny** → `denied` and delete the staged copy.
 3. On `file_accept`: unseal the code → `sending`, with `attempt = 1`. Try a direct link when eligible (§6.5). For a croc attempt, spawn
    `croc --yes --overwrite --disable-clipboard --relay R --pass P send --no-local <staged file>` with env
@@ -527,6 +534,12 @@ settings** → **Experimental** (`PUT /api/experimental`, followed by an `experi
 Turning them on or off reconfigures every conversation right away; no restart is needed.
 
 ## 8. Local daemon API (127.0.0.1 only)
+
+- `POST /api/p2p/reset` accepts `{ ch?: string }` and clears persisted crash disables for one channel or all channels. Returns current P2P status. State exposes active disable expiry times in `p2p.crashDisabled`.
+- `GET /api/transfers/:tid/download` streams a completed incoming quarantine file as an attachment with `nosniff` and `no-store` headers. Quarantine directories and file symlinks are rejected.
+- `DELETE /api/transfers/:tid/file` removes the completed incoming quarantine file, clears its stored path, emits an updated transfer, and preserves history.
+- `GET /api/transfers/:tid/preview` returns `{ name, kind, content }` for Markdown, sandboxed HTML, or UTF-8 source/text files (1 MiB maximum). Raster PNG, JPEG, GIF, and WebP return `{ name, kind: "image", mimeType, dataBase64 }` (10 MiB maximum). SVG is rejected. Text renders as text nodes; HTML uses the sandboxed preview frame.
+
 
 - It binds to `127.0.0.1` only. Requests must have `Host: 127.0.0.1:<port>` or `localhost:<port>`
   (DNS-rebinding guard). Every `/api` call needs the header `X-Spencer-Token: <token>`. The token is

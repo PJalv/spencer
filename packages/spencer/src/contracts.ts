@@ -288,6 +288,7 @@ export interface EventSink {
 /** What the transfer manager needs from the core. */
 export interface TransferP2pJob { kill(): void; done: Promise<{ ok: boolean; killed?: boolean; error?: string; resumedFrom?: number }>; }
 export interface TransferP2pAdapter {
+  ineligibleReason?(ch: string, peerId: string, size: number, hasCroc: boolean): string | undefined;
   canTryLink(ch: string, peerId: string, size: number, hasCroc: boolean): boolean;
   sendOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; filePath: string; size: number; onReady: () => void; onProgress: (fraction: number) => void }): TransferP2pJob;
   receiveOverLink(opts: { tid: string; ch: string; peerId: string; attempt: number; partPath: string; finalPath: string; size: number; onProgress: (fraction: number) => void }): TransferP2pJob;
@@ -322,6 +323,7 @@ export interface TransferDeps {
    * model sees it wrapped as data, not as instructions.
    */
   ownerNote(text: string, opts?: { untrusted?: boolean }): void;
+  channelTransferNote?(ch: string, text: string, opts?: { untrusted?: boolean }): void;
   /** Diagnostic log line (not shown to the owner). */
   log?: (msg: string) => void;
   now?: () => number;
@@ -347,11 +349,7 @@ export interface TransferUpload {
   bytes: AsyncIterable<Uint8Array>;
 }
 
-export interface TransferPreview {
-  name: string;
-  kind: "markdown" | "html";
-  content: string;
-}
+export type TransferPreview = { name: string; kind: "markdown" | "html" | "text"; content: string } | { name: string; kind: "image"; mimeType: string; dataBase64: string };
 
 export interface TransferService {
   start(): Promise<void>;
@@ -368,6 +366,8 @@ export interface TransferService {
   list(ch?: string): Transfer[];
   get(tid: string): Transfer | undefined;
   preview(tid: string): Promise<TransferPreview>;
+  download?(tid: string): Promise<{ name: string; size: number; handle: import("node:fs/promises").FileHandle }>;
+  deleteFile?(tid: string): Promise<Transfer>;
 }
 
 // ---------------------------------------------------------------- core → agent
@@ -468,6 +468,7 @@ export interface AgentService {
   ownerBusy(): boolean;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
+  channelNote?(ch: string, text: string, opts?: { untrusted?: boolean }): Promise<void>;
   /** A channel was created/joined/updated (settings, members): reconfigure its conversation. */
   channelChanged(ch: string): Promise<void>;
   bioChanged?(): Promise<void>;

@@ -41,7 +41,7 @@ export interface ToolDeps {
 }
 
 export const OWNER_TOOL_NAMES = ["update_work_brief", "list_work_brief", "read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
-export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send"];
+export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "list_transfers"];
 export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
 export const CONVERSATION_TOOL_NAMES = ["search_news"];
 /** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
@@ -324,14 +324,16 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
       name: "list_transfers",
       description: "List file transfers, optionally only those of one channel.",
       parameters: schema({ channel: str("Channel id or name (optional)") }),
-      async execute(args: { channel?: string }) {
-        let chId: string | undefined;
-        if (args.channel) {
+      async execute(args: { channel?: string }, ctx) {
+        const channel = ctx.conversationKey === "owner" ? undefined : channelOfKey(core, ctx);
+        if (ctx.conversationKey !== "owner" && !channel) return fail("unknown channel");
+        let chId: string | undefined = channel?.id;
+        if (!channel && args.channel) {
           const ch = resolveChannel(core, args.channel);
           if (typeof ch === "string") return fail(ch);
           chId = ch.id;
         }
-        const list = core.listTransfers(chId).map((t) => ({
+        const list = core.listTransfers(chId).filter(t => !chId || t.ch === chId).map((t) => ({
           tid: t.tid,
           ch: t.ch,
           direction: t.direction,
@@ -344,7 +346,7 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
           updatedAt: new Date(t.updatedAt).toISOString(),
           ...(t.via ? { via: t.via } : {}),
           ...(t.error ? { error: t.error } : {}),
-          ...(t.path && t.direction === "in" ? { path: t.path } : {}),
+          ...(t.path && t.direction === "in" && (!channel || channel.trust === "full") ? { path: t.path } : {}),
         }));
         return list.length ? JSON.stringify(list, null, 1) : "No transfers.";
       },

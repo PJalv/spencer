@@ -32,8 +32,8 @@ const NOTE_LABEL = {
 /** Consecutive turns by the same speaker within this window share one header. */
 const GROUP_MS = 5 * 60_000;
 const MAX_DRAFT_FILES = 10;
-const MAX_DRAFT_BYTES = 50 * 1024 * 1024;
-const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_DRAFT_BYTES = 512 * 1024 * 1024;
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const attachmentDraftsByChannel = new Map();
 
 function hasDraggedFiles(e) {
@@ -421,6 +421,7 @@ function settingsModal(c) {
     h("div.field", null, h("div.label", null, "Hub"), h("code.mono", null, c.relayUrl ?? "")),
     h("label.switch-row", null, directLink, h("span", null, h("strong", null, "Direct file transfers"), h("span.hint.block", null, `Send files directly when you're both online. Faster, and the bytes don't go through the server, but ${peerName ? `${peerName}'s Spencer sees` : "peers' Spencers see"} your IP address while a file is moving.`))),
     S.p2p?.available === false ? h("div.callout.warn", null, icon("warn", 16), h("span", null, `Direct file transfers aren't available on this machine${S.p2p.error ? ": " + S.p2p.error : "."}`)) : null,
+    S.p2p?.crashDisabled?.[c.id] ? h("button.btn", { type: "button", on: { click: async (event) => { const button = event.currentTarget; const status = await attempt(() => api.resetP2p(c.id)); if (status) { S.p2p = { ...S.p2p, ...status }; button.remove(); toast("Direct links re-enabled"); } } } }, "Re-enable direct links") : null,
     S.p2p?.mode === "off" ? h("span.hint.block", null, `Direct file transfers are currently disabled in Spencer's config (p2p.mode = "off").`) : null,
     h("label.switch-row", null, allowLocal, h("span", null, h("strong", null, "Allow local network addresses"), h("span.hint.block", null, "Share local LAN addresses in this channel for faster transfers between machines on the same Wi-Fi or network."))),
     h("label.switch-row", null, shareBio, h("span", null, "Share my BIO in this channel", h("span.hint.block", null, "Turning this off clears it for peers going forward. Peers may already have an older copy."))),
@@ -823,7 +824,7 @@ export function channelView(main, chId) {
       const error = draftFileError(file, MAX_FILE_BYTES);
       if (error) { toast(error); continue; }
       if (hasDraftFile(drafts, file)) continue;
-      if (drafts.length >= MAX_DRAFT_FILES || total + file.size > MAX_DRAFT_BYTES) { toast("The composer allows up to 10 files and 50 MiB at a time"); break; }
+      if (drafts.length >= MAX_DRAFT_FILES || total + file.size > MAX_DRAFT_BYTES) { toast("The composer allows up to 10 files and 512 MiB at a time"); break; }
       drafts.push({ file, uploadId: crypto.randomUUID(), status: "draft", progress: 0, error: "" });
       total += file.size;
     }

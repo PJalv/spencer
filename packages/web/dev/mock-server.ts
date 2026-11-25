@@ -998,7 +998,12 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       return { channel: chn };
     }
   }
+  if (a === "p2p" && b === "reset" && method === "POST") return { available: true, active: 0, crashDisabled: {} };
   if (a === "transfers") {
+    if (b && c === "file" && method === "DELETE") { const t = getTransfer(b); if (t.direction !== "in" || t.state !== "completed") throw new HttpError(400, "incoming completed file required"); delete t.path; emitTransfer(t); return t; }
+    if (b && c === "preview" && method === "GET") { const t = getTransfer(b); if (!t.path || t.direction !== "in" || t.state !== "completed") throw new HttpError(400, "quarantine file required"); const ext = t.name.split(".").pop()?.toLowerCase(); if (ext === "svg") throw new HttpError(400, "unsupported preview file type"); if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext ?? "")) return { name: t.name, kind: "image", mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }; return { name: t.name, kind: ext === "md" ? "markdown" : ext === "html" ? "html" : "text", content: "Mock quarantine file preview" }; }
+    if (b === "upload" && method === "POST") { const chn = getChannel(url.searchParams.get("ch") ?? ""); let size = 0; for await (const chunk of req) size += chunk.length; if (size > 256 * 1024 * 1024) throw new HttpError(413, "256 MiB limit"); const t = addTransfer({ ch: chn.id, direction: "out", peer: url.searchParams.get("to") ?? chn.members.find(m => !m.me)!.id, name: url.searchParams.get("name") ?? "file", size, state: "offered", initiatedBy: "owner" }); emitTransfer(t); return t; }
+
     if (!b && method === "GET") return { items: [...transfers.values()] };
     if (!b && method === "POST") {
       const body = await readJson(req);
@@ -1011,7 +1016,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       if (chn.kind === "group" && !to) throw new HttpError(400, "to is required in groups");
       if (!to) to = peersOf[0]?.id;
       if (!to || !peersOf.some((m) => m.id === to)) throw new HttpError(400, "recipient is not a member of this channel");
-      const t = addTransfer({ ch: chn.id, direction: "out", peer: to, name: basename(path), size: Math.floor(Math.random() * 30_000_000) + 1000, state: "awaiting_approval", initiatedBy: "owner", path });
+      const t = addTransfer({ ch: chn.id, direction: "out", peer: to, name: basename(path), size: Math.floor(Math.random() * 30_000_000) + 1000, state: "offered", initiatedBy: "owner", path });
       emitTransfer(t);
       return t;
     }
@@ -1260,6 +1265,8 @@ const server = createServer(async (req, res) => {
   if (url.pathname.startsWith("/api/")) {
     if (req.headers["x-spencer-token"] !== TOKEN) return send(res, 401, { error: "missing or bad token" });
     try {
+      const download = /^\/api\/transfers\/([^/]+)\/download$/.exec(url.pathname);
+      if (download && req.method === "GET") { const t = getTransfer(download[1]!); if (!t.path || t.direction !== "in" || t.state !== "completed") throw new HttpError(400, "quarantine file required"); res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": 'attachment; filename="mock-file.txt"', "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" }); res.end("Mock quarantine file"); return; }
       const out = await api(req, url);
       // Small delay so pending states are visible.
       await new Promise((r) => setTimeout(r, 120));
