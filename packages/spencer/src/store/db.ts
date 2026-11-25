@@ -6,7 +6,8 @@ import { join } from "node:path";
  * Core schema. Other parts (transfers, agent) create their own tables in the same file with
  * `CREATE TABLE IF NOT EXISTS`; they must not use PRAGMA user_version, which belongs to the core.
  */
-const MIGRATIONS: string[] = [
+type Migration = string | ((db: DatabaseSync) => void);
+const MIGRATIONS: Migration[] = [
   // 1: initial schema
   `
   CREATE TABLE channels (
@@ -84,6 +85,19 @@ const MIGRATIONS: string[] = [
    ALTER TABLE members ADD COLUMN about_at INTEGER;`,
   // 7: the name sent in our last hello, so a rename re-greets the channel
   `ALTER TABLE channels ADD COLUMN last_hello_name TEXT NOT NULL DEFAULT ''`,
+  // 8: Reconcile independently-created v7 layouts and add the ordering index.
+  // Earlier v7 builds used this slot for reconciliation instead of last_hello_name.
+  (db) => {
+    const addColumnIfMissing = (table: "channels" | "members", column: string, declaration: string) => {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${declaration}`);
+    };
+    addColumnIfMissing("channels", "share_bio", "share_bio INTEGER NOT NULL DEFAULT 1");
+    addColumnIfMissing("channels", "last_hello_about", "last_hello_about TEXT");
+    addColumnIfMissing("channels", "last_hello_name", "last_hello_name TEXT NOT NULL DEFAULT ''");
+    addColumnIfMissing("members", "about_at", "about_at INTEGER");
+    db.exec("CREATE INDEX IF NOT EXISTS messages_ch_seq ON messages (ch, seq) WHERE seq IS NOT NULL");
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -122,7 +136,9 @@ export function migrate(db: DatabaseSync): void {
   if (v > MIGRATIONS.length) throw new Error(`database schema v${v} is newer than this Spencer (v${MIGRATIONS.length})`);
   while (v < MIGRATIONS.length) {
     tx(db, () => {
-      db.exec(MIGRATIONS[v]);
+      const migration = MIGRATIONS[v];
+      if (typeof migration === "string") db.exec(migration);
+      else migration(db);
       db.exec(`PRAGMA user_version = ${v + 1}`);
     });
     v++;

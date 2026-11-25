@@ -210,23 +210,44 @@ export function removeChannel(ch) {
 }
 
 export function setMessages(ch, items) {
-  S.messages.set(ch, [...items].sort(byOrder));
+  // The API has applied relay ordering across the entire history before slicing a page.
+  // Preserve that order; recomputing from only this page can change its cursor boundary.
+  S.messages.set(ch, [...items]);
   emit(`messages:${ch}`);
 }
 
 const counted = new Set(); // message ids already counted as unread
+
+export function maxMessageSequence(messages) {
+  let maxSeq = 0;
+  messages.forEach((message) => {
+    if (Number.isSafeInteger(message.seq) && message.seq > maxSeq) maxSeq = message.seq;
+  });
+  return maxSeq;
+}
 
 export function upsertMessage(ch, m) {
   const list = S.messages.get(ch);
   let isNew = !counted.has(m.id);
   if (list) {
     const i = list.findIndex((x) => x.id === m.id);
+    let shouldReorder = false;
     if (i >= 0) {
-      list[i] = { ...list[i], ...m };
+      const previous = list[i];
+      list[i] = { ...previous, ...m };
       isNew = false;
+      shouldReorder = Number.isSafeInteger(m.seq) && previous.seq !== m.seq;
     } else {
+      const maxSeq = maxMessageSequence(list);
       list.push(m);
-      list.sort(byOrder);
+      // Normal relay delivery appends a newer sequence. Preserve the API's loaded-page
+      // boundary; only an out-of-order replay needs slot reconstruction.
+      shouldReorder = Number.isSafeInteger(m.seq) && m.seq < maxSeq;
+    }
+    if (shouldReorder) {
+      const ordered = orderBySequenceSlots(list);
+      list.length = 0;
+      for (const message of ordered) list.push(message);
     }
   }
   if (isNew && !m.mine && m.type === "chat" && !isViewing(ch)) {
@@ -237,9 +258,41 @@ export function upsertMessage(ch, m) {
   emit(`messages:${ch}`);
 }
 
-function byOrder(a, b) {
-  if (a.seq !== undefined && b.seq !== undefined && a.seq !== b.seq) return a.seq - b.seq;
-  return a.ts - b.ts;
+function insertBlock(items, index, block) {
+  const length = items.length;
+  items.length = length + block.length;
+  for (let i = length - 1; i >= index; i--) items[i + block.length] = items[i];
+  for (let i = 0; i < block.length; i++) items[index + i] = block[i];
+}
+
+function orderBySequenceSlots(items) {
+  // Use each row's persistent database slot, not its already-rendered position. That keeps
+  // a delayed acknowledgement from changing the slots used by a subsequent replay.
+  const slots = items.map((message, index) => ({
+    message,
+    index,
+    slot: Number.isSafeInteger(message.timelineSlot) ? message.timelineSlot : index,
+  })).sort((a, b) => a.slot - b.slot || a.index - b.index);
+  const ordered = slots.map((entry) => entry.message).filter((m) => Number.isSafeInteger(m.seq)).sort((a, b) => a.seq - b.seq);
+  let next = 0;
+  const result = slots.map(({ message }) => (Number.isSafeInteger(message.seq) ? ordered[next++] : message));
+
+  // A sequenced reply may be replayed after a later-sequence message. Keep its unsequenced
+  // parent (and neighboring local rows) together, ahead of the earliest such reply.
+  for (let i = 0; i < result.length; i++) {
+    const child = result[i];
+    if (!Number.isSafeInteger(child.seq) || !child.replyTo) continue;
+    const parentIndex = result.findIndex((m) => m.id === child.replyTo);
+    if (parentIndex <= i || Number.isSafeInteger(result[parentIndex]?.seq)) continue;
+    let start = parentIndex;
+    while (start > 0 && !Number.isSafeInteger(result[start - 1].seq)) start--;
+    let end = parentIndex + 1;
+    while (end < result.length && !Number.isSafeInteger(result[end].seq)) end++;
+    const pending = result.splice(start, end - start);
+    insertBlock(result, i, pending);
+    i = -1; // Re-check the reordered list for additional parent/reply constraints.
+  }
+  return result;
 }
 
 export function setTransfers(items) {

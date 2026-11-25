@@ -23,7 +23,7 @@ export interface ApiBackend {
   transfers(): TransferService;
   ownerAttachments: OwnerAttachmentStore;
   state(): unknown;
-  channelMessages(ch: string, limit: number, before?: string): ChannelMessage[];
+  channelMessages(ch: string, limit: number, before?: string, markRead?: boolean): ChannelMessage[];
   updateChannel(ch: string, patch: Record<string, unknown>): Channel;
   leaveChannel(ch: string): Promise<void>;
   acceptInvite(link: string): Promise<Channel>;
@@ -541,7 +541,7 @@ export class ApiServer {
       const ch = m[1];
       if (!b.core.getChannel(ch)) throw new HttpError(404, "unknown channel");
       if (method === "GET") {
-        return { items: b.channelMessages(ch, intParam(q.get("limit"), 100, 1000), q.get("before") || undefined) };
+        return { items: b.channelMessages(ch, intParam(q.get("limit"), 100, 1000), q.get("before") || undefined, q.get("markRead") !== "false") };
       }
       if (method === "POST") {
         const body = await readJson(req);

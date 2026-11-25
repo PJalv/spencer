@@ -351,9 +351,9 @@ export class Daemon {
       transfers: () => this.need("transfers"),
       ownerAttachments: new OwnerAttachmentStore(this.need("db"), this.dataDir),
       state: () => this.apiState(),
-      channelMessages: (ch, limit, before) => {
+      channelMessages: (ch, limit, before, markRead = true) => {
         const items = channels.messages(ch, limit, before, ["chat", "hello"]);
-        if (!before) channels.markRead(ch);
+        if (markRead && !before) channels.markRead(ch);
         return items;
       },
       updateChannel: (ch, patch) => {

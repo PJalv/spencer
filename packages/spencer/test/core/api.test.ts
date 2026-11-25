@@ -200,6 +200,16 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     );
     assert.ok(older.items.every((m: any) => m.id !== back.id));
 
+    // A passive window reconciliation must not clear a background channel's unread count.
+    B.daemon.sendHuman(ch, "still unread after a passive refresh");
+    await waitFor(() => A.daemon.core.getChannel(ch)!.unread === 1, "second incoming unread message");
+    const passive = await http(port, "GET", `/api/channels/${ch}/messages?limit=10&markRead=false`, { headers: H });
+    assert.equal(passive.status, 200);
+    assert.equal(A.daemon.core.getChannel(ch)!.unread, 1, "a non-reading transcript fetch preserves unread state");
+    const foreground = await http(port, "GET", `/api/channels/${ch}/messages?limit=10`, { headers: H });
+    assert.equal(foreground.status, 200);
+    assert.equal(A.daemon.core.getChannel(ch)!.unread, 0, "the existing first-page request still marks a viewed channel read");
+
     // --- patch channel
     const pt = await http(port, "PATCH", `/api/channels/${ch}`, { headers: H, body: { name: "Bobby", autoReply: false, allowedMcpTools: ["mcp__fs__read"] } });
     assert.equal(pt.status, 200);
