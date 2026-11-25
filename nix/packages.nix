@@ -14,7 +14,7 @@ let
   workspace = pkgs.buildNpmPackage {
     pname = "spencer-workspace";
     inherit version src nodejs;
-    npmDepsHash = "sha256-AGvGh7OoB/KWSY8pr6cHidagvPaK9O2lXyVVOmHBLpI=";
+    npmDepsHash = "sha256-pr3Gwzku95UPXZRbBhvTPyaSxJTpcm9NZwq5jbFvg7c=";
     # Install scripts are not needed (esbuild finds its platform binary package directly).
     npmFlags = [ "--ignore-scripts" ];
     npmBuildScript = "build:relay";

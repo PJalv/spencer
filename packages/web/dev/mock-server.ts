@@ -845,7 +845,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       followups: [...followups.values()],
       model,
       p2p: { mode: "files", available: true },
-      version: "0.3.0-dev",
+      version: "0.3.1-dev",
     };
   }
   if (a === "owner" && b === "attachments" && c === "upload" && method === "POST") {
