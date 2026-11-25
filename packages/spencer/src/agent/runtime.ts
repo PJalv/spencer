@@ -36,7 +36,7 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import type { OwnerAttachment, OwnerItem } from "../contracts.ts";
+import type { OwnerAttachment, OwnerItem, OwnerQueuedItem, OwnerRunState } from "../contracts.ts";
 
 // ------------------------------------------------------------------ public surface
 
@@ -85,6 +85,8 @@ export interface NoteInput {
 export interface InputSubmission {
   content: string;
   requestId: string;
+  whenBusy?: "steer" | "followUp" | "reject";
+  whenIdle?: "reject";
   display?: { kind: string; data: unknown };
 }
 
@@ -94,6 +96,7 @@ export interface WatchHandlers {
   /** New committed transcript items, oldest first. */
   onItems?(items: OwnerItem[]): void;
   onBusy?(busy: boolean): void;
+  onState?(state: OwnerRunState): void;
 }
 
 export interface AgentRuntime {
@@ -105,6 +108,14 @@ export interface AgentRuntime {
   appendNote(key: string, note: NoteInput): Promise<void>;
   /** Rejects with the signal's reason once `signal` aborts; the wait is released then. */
   waitAnswer(submissionId: string, signal?: AbortSignal): Promise<Answer>;
+  /** Abort active run(s) and withdraw queued inputs in this conversation. */
+  abort(key: string): Promise<void>;
+  /** Resume an idle conversation after a stopped/failed run without adding a new user message. */
+  continueRun(key: string): Promise<string>;
+  /** Withdraw a queued submission from this conversation's inbox. */
+  abortSubmission(key: string, submissionId: string): Promise<"aborted" | "already_placed" | "settled" | "not_found">;
+  /** Live busy/queue/continue state for a watched conversation. */
+  runState(key: string): OwnerRunState;
   transcript(key: string, limit: number): Promise<OwnerItem[]>;
   watch(key: string, handlers: WatchHandlers): Promise<() => Promise<void>>;
   isBusy(key: string): boolean;
@@ -148,6 +159,7 @@ export class PiRuntime implements AgentRuntime {
   private convToKey = new Map<number, string>();
   private ensuring = new Map<string, Promise<ConversationId>>();
   private busy = new Map<string, boolean>();
+  private state = new Map<string, OwnerRunState>();
   private waits = new Set<(reason?: unknown) => void>();
   private watches = new Set<() => Promise<void>>();
   private closed = false;
@@ -232,6 +244,7 @@ export class PiRuntime implements AgentRuntime {
     this.keyToConv.delete(key);
     if (id !== undefined) this.convToKey.delete(id as number);
     this.busy.delete(key);
+    this.state.delete(key);
     this.allowed.delete(key);
     if (this.keySpecs.delete(key)) this.reinstall();
     this.opts.db.prepare("DELETE FROM agent_conversations WHERE key = ?").run(key);
@@ -361,11 +374,34 @@ export class PiRuntime implements AgentRuntime {
         type: "input",
         content: input.content,
         requestId: input.requestId,
+        ...(input.whenBusy ? { whenBusy: input.whenBusy } : {}),
+        ...(input.whenIdle ? { whenIdle: input.whenIdle } : {}),
         ...(input.display ? { entry: { kind: input.display.kind, data: toJson(input.display.data) } } : {}),
       },
       BACKGROUND_CONTEXT,
     );
     return String(s.id);
+  }
+
+  async abort(key: string): Promise<void> {
+    const conv = await this.conversation(key);
+    await conv.abort(BACKGROUND_CONTEXT);
+  }
+
+  async continueRun(key: string): Promise<string> {
+    const conv = await this.conversation(key);
+    const s = await conv.submit({ type: "continue" }, BACKGROUND_CONTEXT);
+    return String(s.id);
+  }
+
+  async abortSubmission(key: string, submissionId: string): Promise<"aborted" | "already_placed" | "settled" | "not_found"> {
+    const id = Number(submissionId);
+    if (!Number.isSafeInteger(id) || id <= 0) return "not_found";
+    return await this.h().abortSubmission(id as SubmissionId, BACKGROUND_CONTEXT, await this.convId(key));
+  }
+
+  runState(key: string): OwnerRunState {
+    return this.state.get(key) ?? { busy: this.busy.get(key) ?? false, queue: [] };
   }
 
   async appendNote(key: string, note: NoteInput): Promise<void> {
@@ -424,8 +460,10 @@ export class PiRuntime implements AgentRuntime {
     const conv = await this.conversation(key);
     const watch = await conv.watch(BACKGROUND_CONTEXT);
     let last = maxId(watch.value.entries);
-    let busy = Boolean(watch.value.docs["pi.live"]?.run);
-    this.busy.set(key, busy);
+    let runState = extractRunState(watch.value);
+    let lastStateJson = JSON.stringify(runState);
+    this.busy.set(key, runState.busy);
+    this.state.set(key, runState);
     watch.start(async (call) => {
       if (call.kind !== "value") return;
       const fresh = call.value.entries.filter((e) => (e.id as number) > last);
@@ -434,11 +472,16 @@ export class PiRuntime implements AgentRuntime {
         const items = fresh.flatMap(entryItems);
         if (items.length) handlers.onItems?.(items);
       }
-      const nowBusy = Boolean(call.value.docs["pi.live"]?.run);
-      if (nowBusy !== busy) {
-        busy = nowBusy;
-        this.busy.set(key, busy);
-        handlers.onBusy?.(busy);
+      const nextState = extractRunState(call.value);
+      const prevBusy = runState.busy;
+      runState = nextState;
+      this.busy.set(key, nextState.busy);
+      this.state.set(key, nextState);
+      if (nextState.busy !== prevBusy) handlers.onBusy?.(nextState.busy);
+      const nextJson = JSON.stringify(nextState);
+      if (nextJson !== lastStateJson) {
+        lastStateJson = nextJson;
+        handlers.onState?.(nextState);
       }
     });
     let stopped = false;
@@ -517,6 +560,41 @@ function contentText(content: unknown): string {
   return "";
 }
 
+function extractRunState(view: { docs: Record<string, any> }): OwnerRunState {
+  const live = view.docs["pi.live"];
+  const inbox = view.docs["pi.inbox"];
+  const busy = Boolean(live?.run);
+  const queue: OwnerQueuedItem[] = [];
+  for (const it of inbox?.items ?? []) {
+    if (!it || (it.mode !== "steer" && it.mode !== "followUp")) continue;
+    const entryData = it.entry?.data && typeof it.entry.data === "object" ? (it.entry.data as Record<string, unknown>) : undefined;
+    const text = typeof entryData?.text === "string" ? entryData.text : contentText(it.content);
+    const attachments = Array.isArray(entryData?.attachments)
+      ? entryData.attachments.filter((file): file is OwnerAttachment =>
+          !!file && typeof file === "object" && typeof (file as OwnerAttachment).id === "string" &&
+          typeof (file as OwnerAttachment).name === "string" && Number.isSafeInteger((file as OwnerAttachment).size),
+        )
+      : undefined;
+    queue.push({
+      id: String(it.id),
+      mode: it.mode,
+      text: short(text, 400),
+      ...(attachments?.length ? { attachments } : {}),
+    });
+  }
+  const rf = live?.runFailure;
+  const canContinue = !busy && !!rf && typeof rf.reason === "string" && rf.reason !== "nothing_to_answer" && rf.reason !== "reset";
+  const lastFailure = !busy && rf && typeof rf.reason === "string"
+    ? { reason: String(rf.reason), ...(typeof rf.detail === "string" && rf.detail ? { detail: short(rf.detail, 200) } : {}) }
+    : undefined;
+  return {
+    busy,
+    queue,
+    ...(canContinue ? { canContinue: true } : {}),
+    ...(lastFailure ? { lastFailure } : {}),
+  };
+}
+
 function short(s: string, n = 500): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
@@ -548,8 +626,10 @@ function entryItems(e: EntryRecord): OwnerItem[] {
       const out: OwnerItem[] = [];
       const text = assistantText(am);
       if (text) out.push({ id, role: "assistant", text, ts });
-      if (am.stopReason === "error" || am.stopReason === "aborted") {
+      if (am.stopReason === "error") {
         out.push({ id: `${id}.err`, role: "assistant", text: `Model ${am.stopReason}: ${am.errorMessage ?? "no details"}`, ts, isError: true });
+      } else if (am.stopReason === "aborted") {
+        out.push({ id: `${id}.err`, role: "note", kind: "stopped", text: "Stopped.", ts });
       }
       am.content.forEach((b, i) => {
         if (b.type === "toolCall") {
@@ -567,7 +647,7 @@ function entryItems(e: EntryRecord): OwnerItem[] {
       return [{ id, role: "note", text: "(earlier conversation summarized)", ts }];
     default: {
       // Our own kinds: notes, peer messages, errors.
-      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; untrusted?: boolean; request?: string; role?: OwnerItem["role"] };
+      const d = (e.data ?? {}) as { text?: string; ts?: number; isError?: boolean; untrusted?: boolean; request?: string; role?: OwnerItem["role"]; kind?: string; fullText?: string };
       const text = d.text ?? contentText(msg?.content);
       if (!text) return [];
       const role = d.role ?? "note";
@@ -575,6 +655,8 @@ function entryItems(e: EntryRecord): OwnerItem[] {
       if (d.isError) item.isError = true;
       if (d.untrusted) item.untrusted = true;
       if (typeof d.request === "string") item.request = d.request;
+      if (typeof d.kind === "string") item.kind = d.kind;
+      if (typeof d.fullText === "string") item.fullText = d.fullText;
       return [item];
     }
   }

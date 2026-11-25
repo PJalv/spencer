@@ -21,6 +21,7 @@ import {
   clearWorkingFor,
   setOwner,
   setOwnerBusy,
+  setOwnerQueue,
   setMessages,
   unreadCount,
   actionCount,
@@ -361,6 +362,9 @@ function handleEvent(ev) {
     }
     case "owner_busy":
       setOwnerBusy(ev.busy);
+      break;
+    case "owner_queue":
+      setOwnerQueue(ev);
       break;
     case "presence":
       applyPresence(ev);

@@ -59,7 +59,10 @@ export const api = {
   peers: () => request("GET", "/api/peers"),
   state: () => request("GET", "/api/state"),
   ownerMessages: (limit = 200) => request("GET", `/api/owner/messages?limit=${limit}`),
-  ownerSend: (text, attachments = [], requestId) => request("POST", "/api/owner/messages", { text, attachments, ...(requestId ? { requestId } : {}) }),
+  ownerSend: (text, attachments = [], requestId, mode) => request("POST", "/api/owner/messages", { text, attachments, ...(requestId ? { requestId } : {}), ...(mode ? { mode } : {}) }),
+  ownerStop: () => request("POST", "/api/owner/stop"),
+  ownerContinue: () => request("POST", "/api/owner/continue"),
+  ownerWithdraw: (id) => request("DELETE", `/api/owner/queue/${enc(id)}`),
   uploadOwnerFile: (file, uploadId, onProgress) => new Promise((resolve, reject) => {
     const params = new URLSearchParams({ name: file.name, uploadId });
     const xhr = new XMLHttpRequest();

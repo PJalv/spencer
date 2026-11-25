@@ -34,6 +34,7 @@ import type {
   OwnerAttachment,
   OwnerItem,
   OwnerRequest,
+  OwnerRunState,
   SoulStatus,
 } from "../contracts.ts";
 import { END_MARKER, REPEAT_WINDOW, decideConversationReply, decideReply, isRepeat, loopLimits, parseAgentAnswer, textMentions } from "../policy.ts";
@@ -287,6 +288,13 @@ export class SpencerAgent implements AgentService {
         for (const item of items) this.core.events.emit({ type: "owner", item });
       },
       onBusy: (busy) => this.core.events.emit({ type: "owner_busy", busy }),
+      onState: (state) =>
+        this.core.events.emit({
+          type: "owner_queue",
+          queue: state.queue,
+          ...(state.canContinue ? { canContinue: true } : {}),
+          ...(state.lastFailure ? { lastFailure: state.lastFailure } : {}),
+        }),
     });
 
     // Resume replies a previous process left unfinished.
@@ -1590,7 +1598,7 @@ export class SpencerAgent implements AgentService {
         sid = await rt.submitInput(row.conv, {
           content: this.followupInput(row),
           requestId: `followup:${row.id}:w${row.wake_count}`,
-          display: { kind: "spencer.followup", data: { text: `${shown}: ${row.note}`, ts: this.now(), followup: row.id } },
+          display: { kind: "spencer.followup", data: { text: `${shown}: ${row.note}`, ts: this.now(), followup: row.id, kind: "followup" } },
         });
         this.followups.setSubmission(row.id, sid);
       }
@@ -2212,7 +2220,7 @@ export class SpencerAgent implements AgentService {
 
   // ---------------------------------------------------------------- owner
 
-  async ownerSend(text: string, opts: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[] } = {}): Promise<{ submissionId: string }> {
+  async ownerSend(text: string, opts: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[]; mode?: "steer" | "followUp" } = {}): Promise<{ submissionId: string }> {
     const rt = this.rt();
     const attachments = opts.attachments ?? [];
     const attachmentContext = attachments.length
@@ -2221,12 +2229,21 @@ export class SpencerAgent implements AgentService {
     const submissionId = await rt.submitInput(OWNER_KEY, {
       content: `${text}${attachmentContext}`.trim(),
       requestId: `owner:${opts.requestId ?? randomUUID()}`,
+      ...(opts.mode ? { whenBusy: opts.mode } : {}),
       ...(attachments.length ? { display: { kind: "spencer.owner-input", data: { text, attachments: attachments.map(({ id, name, size }) => ({ id, name, size })) } } } : {}),
     });
+    this.trackOwnerSubmission(submissionId);
+    return { submissionId };
+  }
+
+  private trackOwnerSubmission(submissionId: string): void {
+    const rt = this.rt();
     const p: Promise<void> = rt
       .waitAnswer(submissionId)
       .then(async (answer) => {
         if (answer.status === "done" || this.stopping) return;
+        // User-initiated stop / withdrawal or empty continue should not print an error bubble.
+        if (answer.reason === "aborted" || answer.reason.startsWith("aborted:") || answer.reason === "withdrawn" || answer.reason === "nothing_to_answer") return;
         const why = answer.reason.startsWith("no_model")
           ? `No model is available: ${this.models?.error() ?? "check the model settings in config.json"}.`
           : `The model could not answer (${answer.reason}).${this.models?.error() ? ` ${this.models.error()}.` : ""}`;
@@ -2237,7 +2254,30 @@ export class SpencerAgent implements AgentService {
       })
       .finally(() => this.ownerWaits.delete(p));
     this.ownerWaits.add(p);
+  }
+
+  async ownerStop(): Promise<{ stopped: boolean }> {
+    const rt = this.rt();
+    const state = rt.runState(OWNER_KEY);
+    const wasActive = state.busy || state.queue.length > 0;
+    await rt.abort(OWNER_KEY);
+    return { stopped: wasActive };
+  }
+
+  async ownerContinue(): Promise<{ submissionId: string }> {
+    const rt = this.rt();
+    const submissionId = await rt.continueRun(OWNER_KEY);
+    this.trackOwnerSubmission(submissionId);
     return { submissionId };
+  }
+
+  async ownerWithdraw(submissionId: string): Promise<{ result: "aborted" | "already_placed" | "settled" | "not_found" }> {
+    const result = await this.rt().abortSubmission(OWNER_KEY, submissionId);
+    return { result };
+  }
+
+  ownerRunState(): OwnerRunState {
+    return this.runtime?.runState(OWNER_KEY) ?? { busy: this.ownerBusy(), queue: [] };
   }
 
   /** Each poll owns one waiter and releases it when the poll ends (timeout or `signal`, e.g. the client left). */

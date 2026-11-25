@@ -25,6 +25,7 @@ export const S = {
   owner: null, // OwnerItem[] once loaded
   ownerBusy: false,
   ownerBusySince: 0,
+  ownerRun: { busy: false, queue: [], canContinue: false, lastFailure: null },
   wsUp: false,
   loaded: false,
   view: { name: "owner" }, // {name:"owner"} | {name:"channel", ch} | {name:"transfers"} | {name:"mcp"} | {name:"model"}
@@ -103,6 +104,7 @@ export function setState(st) {
   S.relay = st.relay ?? S.relay;
   S.relays = Array.isArray(st.relays) ? st.relays : [];
   if (typeof st.ownerBusy === "boolean") setOwnerBusy(st.ownerBusy);
+  if (st.ownerRun && typeof st.ownerRun === "object") setOwnerQueue(st.ownerRun);
   S.p2p = st.p2p ?? null;
   S.policy = st.policy ?? {};
   const experimental = st.experimental === true;
@@ -154,7 +156,19 @@ export function setModel(m) {
 export function setOwnerBusy(busy) {
   if (busy && !S.ownerBusy) S.ownerBusySince = Date.now();
   S.ownerBusy = !!busy;
+  S.ownerRun = { ...S.ownerRun, busy: S.ownerBusy, ...(S.ownerBusy ? { canContinue: false } : {}) };
   emit("busy");
+}
+
+export function setOwnerQueue(ev) {
+  const queue = Array.isArray(ev?.queue) ? ev.queue : [];
+  S.ownerRun = {
+    busy: typeof ev?.busy === "boolean" ? ev.busy : S.ownerBusy,
+    queue,
+    canContinue: !!ev?.canContinue,
+    lastFailure: ev?.lastFailure ?? null,
+  };
+  emit("owner_queue");
 }
 
 export function setConversation(st) {
