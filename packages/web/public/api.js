@@ -111,7 +111,10 @@ export const api = {
   deleteTransferFile: (tid) => request("DELETE", `/api/transfers/${enc(tid)}/file`),
   transferDownload: async (tid, name) => {
     const response = await fetch(`/api/transfers/${enc(tid)}/download`, { headers: { "X-Spencer-Token": token } });
-    if (!response.ok) throw new Error("Download failed");
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(typeof body?.error === "string" ? body.error : "Download failed");
+    }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a"); link.href = url; link.download = name; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);

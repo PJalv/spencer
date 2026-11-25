@@ -76,3 +76,17 @@ test("quarantine cards provide download, safe text preview and inline deletion c
     assert.equal([...transferCard({ ...t, name: "unsafe.svg" }).querySelectorAll("button")].some(b => b.textContent === "Preview"), false);
   } finally { api.transferPreview = original; document.querySelectorAll(".modal-backdrop").forEach(el => el.remove()); card.remove(); root.remove(); }
 });
+
+
+test("download errors show server diagnostics and tolerate non-JSON failures", async () => {
+  const { api } = await import("../public/api.js");
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: false, json: async () => ({ error: "quarantine file is unsafe" }) });
+    await assert.rejects(api.transferDownload("unsafe", "file.txt"), /quarantine file is unsafe/);
+    globalThis.fetch = async () => ({ ok: false, json: async () => { throw new Error("not JSON"); } });
+    await assert.rejects(api.transferDownload("missing", "file.txt"), /Download failed/);
+    globalThis.fetch = async () => ({ ok: false, json: async () => ({ unrelated: true }) });
+    await assert.rejects(api.transferDownload("missing", "file.txt"), /Download failed/);
+  } finally { globalThis.fetch = original; }
+});

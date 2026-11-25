@@ -382,11 +382,16 @@ export class ApiServer {
           const service = this.b.transfers();
           if (!service.download) throw new HttpError(404, "downloads unavailable");
           const file = await service.download(download[1]!);
-          res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._ -]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(file.name)}`, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" });
-          const stream = file.handle.createReadStream();
-          stream.on("error", () => res.destroy());
-          res.on("close", () => stream.destroy());
-          stream.pipe(res);
+          try {
+            res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._ -]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(file.name)}`, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store", "Content-Length": String(file.size) });
+            const stream = file.handle.createReadStream();
+            stream.on("error", () => res.destroy());
+            res.on("close", () => stream.destroy());
+            stream.pipe(res);
+          } catch (error) {
+            await file.handle.close();
+            throw error;
+          }
           return;
         }
         const out = await this.route(req.method ?? "GET", url, req);

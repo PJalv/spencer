@@ -63,6 +63,15 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     assert.equal((await http(port, "POST", "/api/p2p/reset", { headers: H, body: {} })).status, 200);
     assert.equal((await http(port, "POST", "/api/p2p/reset", { headers: H, body: { ch: "unknown" } })).status, 400);
 
+    const links = A.daemon["s"].links;
+    A.daemon["s"].links = undefined;
+    try {
+      const reset = await http(port, "POST", "/api/p2p/reset", { headers: H, body: {} });
+      assert.equal(reset.status, 200);
+      assert.equal(reset.json().active, 0);
+      assert.deepEqual(reset.json().crashDisabled, {});
+    } finally { A.daemon["s"].links = links; }
+
     // --- state shape
     const st = (await http(port, "GET", "/api/state", { headers: H })).json();
     assert.deepEqual(Object.keys(st.me).sort(), ["fingerprint", "id", "name"]);
@@ -257,16 +266,32 @@ test("http api: guards, state, owner + channel messages, invites, events ws", as
     }
     transferService.requestUpload = requestUpload;
     const files: TransferService = transferService;
+    if (links) {
+      const status = links.status.bind(links);
+      const cfg = A.daemon["s"].cfg!;
+      const mode = cfg.p2p.mode;
+      cfg.p2p.mode = "files";
+      links.status = () => ({ ...status(), available: true });
+      try {
+        const diagnostic = A.daemon["buildTransferDeps"]().p2p!.ineligibleReason!;
+        assert.equal(diagnostic("unknown-channel", "not-a-member", 1, false), "peer not in channel");
+      } finally { links.status = status; cfg.p2p.mode = mode; }
+    }
     const downloadPath = join(t.dir, "download-fixture.txt");
     writeFileSync(downloadPath, "download contents");
-    files.download = async () => ({ name: 'file".txt', handle: await open(downloadPath, "r") });
+    files.download = async () => ({ name: 'file".txt', size: Buffer.byteLength("download contents"), handle: await open(downloadPath, "r") });
     const downloaded = await http(port, "GET", "/api/transfers/download-test/download", { headers: H });
+    assert.equal(downloaded.headers["content-length"], String(Buffer.byteLength("download contents")));
     assert.equal(downloaded.status, 200); assert.equal(downloaded.text, "download contents");
     assert.equal(downloaded.headers["x-content-type-options"], "nosniff");
     assert.equal(downloaded.headers["cache-control"], "no-store");
     assert.match(String(downloaded.headers["content-disposition"]), /attachment; filename="file_.txt"/);
     files.deleteFile = async () => { throw new TransferError("bad_state", "not completed"); };
     assert.equal((await http(port, "DELETE", "/api/transfers/download-test/file", { headers: H })).status, 409);
+    const invalidHeaderFile = await open(downloadPath, "r");
+    files.download = async () => ({ name: "\ud800", size: 0, handle: invalidHeaderFile });
+    assert.equal((await http(port, "GET", "/api/transfers/download-test/download", { headers: H })).status, 500);
+    assert.equal(invalidHeaderFile.fd, -1, "response setup failure closes the file handle");
     const preview = transferService.preview.bind(transferService);
     transferService.preview = async () => { throw new TransferError("too_large", "preview is too large"); };
     const previewTooLarge = await http(port, "GET", "/api/transfers/preview-test/preview", { headers: H });

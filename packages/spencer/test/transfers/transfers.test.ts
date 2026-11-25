@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -842,4 +842,47 @@ it("a peer retry names the failed direct link transport", async () => {
   await waitFor(() => A.s.get(t.tid)?.via === "link", "link attempted");
   await A.s.onBody(ch, B.id.id, { type: "file_retry", tid: t.tid, to: A.id.id, attempt: 1 });
   assert.equal(A.s.get(t.tid)!.error, "recipient's direct link failed");
+});
+
+
+it("quarantine deletion clears missing files and missing directories idempotently", async () => {
+  const { A, B, ch } = await setup();
+  for (const removeDirectory of [false, true]) {
+    const { path } = makeFile(A, "missing.txt");
+    const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+    await waitFor(() => B.state(t.tid) === "completed", "incoming complete");
+    const incoming = B.s.get(t.tid)!;
+    if (removeDirectory) rmSync(join(B.dataDir, "quarantine", t.tid), { recursive: true });
+    else unlinkSync(incoming.path!);
+    const updated = await B.s.deleteFile!(t.tid);
+    assert.equal(updated.path, undefined);
+    assert.equal(updated.state, "completed");
+    assert.equal(B.events.at(-1)!.path, undefined);
+    assert.equal(B.db.prepare("SELECT path FROM transfers WHERE tid = ?").get(t.tid)!.path, null);
+    const events = B.events.length;
+    assert.deepEqual(await B.s.deleteFile!(t.tid), updated);
+    assert.equal(B.events.length, events);
+  }
+});
+
+it("quarantine reads reject directory swaps during open and deletion rejects symlink directories", async () => {
+  const { A, B, ch } = await setup();
+  const { path } = makeFile(A, "race.txt");
+  const t = await A.s.request(ch, { path, initiatedBy: "owner" });
+  await waitFor(() => B.state(t.tid) === "completed", "incoming complete");
+  const directory = join(B.dataDir, "quarantine", t.tid);
+  const moved = join(B.dir, "moved-quarantine");
+  for (const read of [() => B.s.download!(t.tid), () => B.s.preview(t.tid)]) {
+    const pending = read();
+    renameSync(directory, moved);
+    symlinkSync(moved, directory, "dir");
+    try {
+      await assert.rejects(pending, /unsafe|quarantine/);
+      await assert.rejects(B.s.deleteFile!(t.tid), /unsafe|quarantine/);
+      assert.ok(B.s.get(t.tid)!.path);
+      assert.ok(existsSync(join(moved, "race.txt")));
+    } finally { unlinkSync(directory); renameSync(moved, directory); }
+  }
+  await B.s.deleteFile!(t.tid);
+  assert.equal(existsSync(directory), false, "empty quarantine folder is removed");
 });

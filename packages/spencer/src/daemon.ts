@@ -351,7 +351,7 @@ export class Daemon {
       transfers: () => this.need("transfers"),
       ownerAttachments: new OwnerAttachmentStore(this.need("db"), this.dataDir),
       state: () => this.apiState(),
-      resetP2p: (ch) => { this.s.links?.clearCrashDisable(ch); return this.s.links?.status(); },
+      resetP2p: (ch) => { this.s.links?.clearCrashDisable(ch); return this.s.links?.status() ?? { ...getP2pAddonStatus(), active: 0, crashDisabled: {} }; },
       channelMessages: (ch, limit, before, markRead = true) => {
         const items = channels.messages(ch, limit, before, ["chat", "hello"]);
         if (markRead && !before) channels.markRead(ch);
@@ -660,6 +660,7 @@ export class Daemon {
         const cfg = this.need("cfg");
         if (cfg.p2p.mode !== "files") return "direct links disabled in config";
         if (!this.s.links?.status().available) return "addon unavailable";
+        if (!channels.peers(ch).includes(peerId)) return "peer not in channel";
         if (channels.directLinkConfig(ch)?.directLink === "off") return "direct links disabled for this channel";
         if (this.s.links.isCrashDisabled(ch)) return "temporarily disabled after crash";
         if (!channels.peerHasFeature(ch, peerId, P2P_FILES_FEATURE)) return "peer lacks p2p-files/1";

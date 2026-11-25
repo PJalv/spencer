@@ -360,7 +360,7 @@ export interface TransferService {
   list(ch?: string): Transfer[];
   get(tid: string): Transfer | undefined;
   preview(tid: string): Promise<TransferPreview>;
-  download?(tid: string): Promise<{ name: string; handle: import("node:fs/promises").FileHandle }>;
+  download?(tid: string): Promise<{ name: string; size: number; handle: import("node:fs/promises").FileHandle }>;
   deleteFile?(tid: string): Promise<Transfer>;
 }
 

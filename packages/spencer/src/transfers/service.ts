@@ -2,7 +2,7 @@
  * File transfer state machine (docs/PROTOCOL.md §6). Control messages go through the durable outbox
  * (deps.enqueue, always in the same SQLite transaction as the state change); bytes go through croc.
  */
-import { chmodSync, constants as fsc, existsSync, lstatSync, readdirSync, renameSync, unlinkSync, copyFileSync } from "node:fs";
+import { chmodSync, constants as fsc, existsSync, lstatSync, readdirSync, renameSync, unlinkSync, copyFileSync, realpathSync, rmdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
@@ -693,6 +693,58 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
 
   // ------------------------------------------------------------ public API
 
+  function incomingFile(tid: string): TransferRow {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) throw new TransferError("bad_request", "invalid transfer id");
+    const r = store.get(tid);
+    if (!r) throw new TransferError("not_found", "unknown transfer");
+    if (r.direction !== "in" || r.state !== "completed") throw new TransferError("bad_request", "only completed incoming quarantine files are available");
+    return r;
+  }
+
+  function quarantinePath(r: TransferRow): string {
+    const expected = resolve(dirs.quarantine, r.tid, sanitizeFileName(r.name));
+    if (!r.path || resolve(r.path) !== expected) throw new TransferError("bad_request", "invalid quarantine path");
+    return expected;
+  }
+
+  function verifyQuarantineDirectories(tid: string, allowMissing = false): string | undefined {
+    let root: string | undefined;
+    for (const dir of [dirs.quarantine, join(dirs.quarantine, tid)]) {
+      try {
+        const st = lstatSync(dir);
+        if (!st.isDirectory() || st.isSymbolicLink()) throw new TransferError("bad_request", "quarantine directory is unsafe");
+        const real = realpathSync(dir);
+        if (root === undefined) root = real;
+        else if (real !== join(root, tid)) throw new TransferError("bad_request", "quarantine directory escaped its root");
+      } catch (error) {
+        if (allowMissing && error instanceof Error && "code" in error && error.code === "ENOENT") return root;
+        throw error;
+      }
+    }
+    return root;
+  }
+
+  async function openQuarantine(r: TransferRow) {
+    const expected = quarantinePath(r);
+    verifyQuarantineDirectories(r.tid);
+    const handle = await open(expected, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) throw new TransferError("bad_request", "quarantine file is not a regular file");
+      const root = verifyQuarantineDirectories(r.tid);
+      const current = lstatSync(expected);
+      if (!current.isFile() || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino ||
+          !root || realpathSync(expected) !== join(root, r.tid, sanitizeFileName(r.name))) {
+        throw new TransferError("bad_request", "quarantine file changed or escaped its root");
+      }
+      return { name: r.name, size: opened.size, handle };
+    } catch (error) {
+      await handle.close();
+      if (error instanceof TransferError) throw error;
+      throw new TransferError("bad_request", "quarantine file changed or is unsafe");
+    }
+  }
+
   return {
     async start() {
       stopped = false;
@@ -1002,45 +1054,36 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
     },
 
     async download(tid) {
-      if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) throw new TransferError("bad_request", "invalid transfer id");
-      const r = store.get(tid);
-      if (!r) throw new TransferError("not_found", "unknown transfer");
-      if (r.direction !== "in" || r.state !== "completed" || !r.path) throw new TransferError("bad_request", "only completed incoming quarantine files are available");
-      const expected = resolve(dirs.quarantine, tid, sanitizeFileName(r.name));
-      if (resolve(r.path) !== expected) throw new TransferError("bad_request", "invalid quarantine path");
       try {
-        for (const dir of [dirs.quarantine, join(dirs.quarantine, tid)]) {
-          const st = lstatSync(dir);
-          if (!st.isDirectory() || st.isSymbolicLink()) throw new TransferError("bad_request", "invalid quarantine directory");
-        }
-        const handle = await open(expected, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
-        try {
-          if (!(await handle.stat()).isFile()) throw new TransferError("bad_request", "not a regular file");
-          return { name: r.name, handle };
-        } catch (error) {
-          await handle.close();
-          throw error;
-        }
-      } catch (e) {
-        if (e instanceof TransferError) throw e;
+        return await openQuarantine(incomingFile(tid));
+      } catch (error) {
+        if (error instanceof TransferError) throw error;
         throw new TransferError("bad_request", "quarantine file is missing or unsafe");
       }
     },
 
     async deleteFile(tid) {
-      const file = await this.download!(tid);
+      const r = incomingFile(tid);
+      if (!r.path) return toApi(r);
+      const expected = quarantinePath(r);
       try {
-        const r = store.get(tid)!;
-        const opened = await file.handle.stat();
-        for (const dir of [dirs.quarantine, join(dirs.quarantine, tid)]) {
-          const st = lstatSync(dir);
-          if (!st.isDirectory() || st.isSymbolicLink()) throw new TransferError("bad_request", "invalid quarantine directory");
+        const root = verifyQuarantineDirectories(tid, true);
+        let current;
+        try { current = lstatSync(expected); } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
         }
-        const current = lstatSync(r.path!);
-        if (current.isSymbolicLink() || current.ino !== opened.ino || current.dev !== opened.dev) throw new TransferError("bad_request", "quarantine file changed");
-        unlinkSync(r.path!);
+        if (current) {
+          if (!root || !current.isFile() || current.isSymbolicLink() || realpathSync(expected) !== join(root, tid, sanitizeFileName(r.name))) {
+            throw new TransferError("bad_request", "quarantine file is unsafe");
+          }
+          unlinkSync(expected);
+        }
+        try { rmdirSync(join(dirs.quarantine, tid)); } catch { /* The folder may be absent or contain other files. */ }
         return toApi(transition(tid, x => x.state === "completed" && x.direction === "in", { path: null })!);
-      } finally { await file.handle.close(); }
+      } catch (error) {
+        if (error instanceof TransferError) throw error;
+        throw new TransferError("bad_request", "quarantine file is unsafe");
+      }
     },
 
     async preview(tid): Promise<TransferPreview> {
@@ -1059,12 +1102,7 @@ export function createTransferService(deps: TransferDeps, options: TransferServi
       if (!r.path || resolve(r.path) !== expected) throw new TransferError("bad_request", "file is not at its quarantine location");
       let handle: Awaited<ReturnType<typeof open>> | undefined;
       try {
-        const rootStat = lstatSync(dirs.quarantine);
-        const dirStat = lstatSync(join(dirs.quarantine, tid));
-        if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !dirStat.isDirectory() || dirStat.isSymbolicLink()) {
-          throw new TransferError("bad_request", "quarantine location is invalid");
-        }
-        handle = await open(expected, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+        handle = (await openQuarantine(r)).handle;
         const before = await handle.stat();
         if (!before.isFile()) throw new TransferError("bad_request", "preview file is not a regular file");
         if (before.size > previewLimit) throw new TransferError("too_large", `preview is too large (${kind === "image" ? 10 : 1} MiB maximum)`);
