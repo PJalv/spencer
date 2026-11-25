@@ -4,6 +4,9 @@ import { h, icon, linkify, timeShort, timeFull, relTime, avatar } from "./dom.js
 import { api, attempt, toast } from "./api.js";
 import { S, upsertRequest } from "./state.js";
 
+/** Disclosure state of long decided request cards across transcript re-renders. */
+const openDecidedRequests = new Set();
+
 /**
  * requestCard(id, {text, ts}): `text` and `ts` are the fallback from the owner-chat note when the
  * request itself is not loaded. The text is written from untrusted peer input.
@@ -46,6 +49,21 @@ export function requestCard(id, fallback = {}) {
     foot = h("div.ask-foot.decided", null, icon(state === "approved" ? "check" : "close", 14), h("span", null, state === "approved" ? "You approved this" : "You denied this", when ? " at " : null, when));
   }
 
+  let bodyNode;
+  if (state !== "pending" && text.length > 220) {
+    const preview = text.replace(/\s+/g, " ").trim().slice(0, 140);
+    const details = h(
+      "details.ask-collapse",
+      { open: openDecidedRequests.has(id) },
+      h("summary", null, h("span.ask-collapse-preview", null, preview), icon("chevron", 13)),
+      h("div.ask-text.peer-text", null, linkify(text)),
+    );
+    details.addEventListener("toggle", () => (details.open ? openDecidedRequests.add(id) : openDecidedRequests.delete(id)));
+    bodyNode = details;
+  } else {
+    bodyNode = h("div.ask-text.peer-text", null, linkify(text));
+  }
+
   return h(
     `article.ask.${state}`,
     { "aria-label": `Request from ${who}`, dataset: { request: id } },
@@ -56,7 +74,7 @@ export function requestCard(id, fallback = {}) {
       h("div.ask-title", null, h("strong", null, who), state === "pending" ? " asks for your approval" : " asked for your approval", channel ? [" in ", channel] : null),
       ts ? h("time.ask-time", { datetime: new Date(ts).toISOString(), title: timeFull(ts), "data-rel": state === "pending" ? String(ts) : undefined }, state === "pending" ? `asked ${relTime(ts)}` : timeShort(ts)) : null,
     ),
-    h("div.ask-text.peer-text", null, linkify(text)),
+    bodyNode,
     state === "pending" ? h("div.ask-chips", null, chips) : null,
     foot,
   );

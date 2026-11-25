@@ -178,11 +178,29 @@ export interface OwnerItem {
   ts: number;
   toolName?: string;
   isError?: boolean;
+  /** Semantic entry subtype (e.g. "approval", "followup", "stopped") for cleaner UI collapsing. */
+  kind?: string;
+  /** Optional full underlying text when `text` is a compact summary (e.g. approved request prompt). */
+  fullText?: string;
   /** The text comes from another person's agent (e.g. a peer's reply to something the owner sent): show it as untrusted. */
   untrusted?: boolean;
   /** The note is an owner request (`ask_owner`) the owner can approve or deny: its id. */
   request?: string;
   attachments?: OwnerAttachment[];
+}
+
+export interface OwnerQueuedItem {
+  id: string;
+  mode: "steer" | "followUp";
+  text: string;
+  attachments?: OwnerAttachment[];
+}
+
+export interface OwnerRunState {
+  busy: boolean;
+  queue: OwnerQueuedItem[];
+  canContinue?: boolean;
+  lastFailure?: { reason: string; detail?: string };
 }
 
 /**
@@ -270,6 +288,7 @@ export type DaemonEvent =
   | { type: "transfer"; transfer: Transfer }
   | { type: "owner"; item: OwnerItem }
   | { type: "owner_busy"; busy: boolean }
+  | { type: "owner_queue"; queue: OwnerQueuedItem[]; canContinue?: boolean; lastFailure?: { reason: string; detail?: string } }
   | { type: "request"; request: OwnerRequest }
   | { type: "followup"; followup: Followup }
   /** A member's Spencer is working on a reply (`from` may be me). Ephemeral: not stored for the UI. */
@@ -476,11 +495,19 @@ export interface AgentService {
   onPeerChat(msg: IncomingChat): Promise<{ note?: string }>;
   /** We sent a chat in a channel (owner typed it, or the owner agent sent it): record as channel context. */
   onOutgoingChat(msg: OutgoingChat): Promise<void>;
-  ownerSend(text: string, opts?: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[] }): Promise<{ submissionId: string }>;
+  ownerSend(text: string, opts?: { requestId?: string; attachments?: (OwnerAttachment & { path: string })[]; mode?: "steer" | "followUp" }): Promise<{ submissionId: string }>;
   /** The answer to one owner submission, waiting at most `waitMs`; "pending" when it is not ready yet. */
   ownerAnswer?(submissionId: string, waitMs: number, signal?: AbortSignal): Promise<OwnerAnswer>;
   ownerTranscript(limit: number): Promise<OwnerItem[]>;
   ownerBusy(): boolean;
+  /** Stop the owner conversation's active run and withdraw queued inputs. */
+  ownerStop?(): Promise<{ stopped: boolean }>;
+  /** Resume the owner conversation after a stopped or failed run without adding a new user message. */
+  ownerContinue?(): Promise<{ submissionId: string }>;
+  /** Withdraw a single queued submission from the owner conversation's inbox. */
+  ownerWithdraw?(submissionId: string): Promise<{ result: "aborted" | "already_placed" | "settled" | "not_found" }>;
+  /** Live busy/queue/continue state of the owner conversation. */
+  ownerRunState?(): OwnerRunState;
   /** Informational note appended to the owner conversation (never starts a run). See TransferDeps.ownerNote. */
   ownerNote(text: string, opts?: { untrusted?: boolean }): Promise<void>;
   channelNote?(ch: string, text: string, opts?: { untrusted?: boolean }): Promise<void>;

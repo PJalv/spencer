@@ -457,9 +457,11 @@ export class ApiServer {
         if (text.length > 100_000) throw new HttpError(400, "text too long");
         if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string") || (ids.length === 0 && !text.trim())) throw new HttpError(400, "text or attachments are required");
         if (ids.length > OWNER_ATTACHMENT_MAX_FILES || new Set(ids).size !== ids.length) throw new HttpError(400, "invalid attachments list");
+        const mode = body.mode === undefined ? undefined : body.mode === "steer" || body.mode === "followUp" ? body.mode : null;
+        if (mode === null) throw new HttpError(400, "mode must be 'steer' or 'followUp'");
         const requestId = typeof body.requestId === "string" ? body.requestId : randomUUID();
         if (!/^[A-Za-z0-9_-]{16,64}$/.test(requestId)) throw new HttpError(400, "requestId must be a valid retry id");
-        const fingerprint = createHash("sha256").update(JSON.stringify([text, ids])).digest("hex");
+        const fingerprint = createHash("sha256").update(JSON.stringify(mode === "steer" ? [text, ids, mode] : [text, ids])).digest("hex");
         try {
           const previous = b.ownerAttachments.findOwnerSend(requestId, fingerprint);
           if (previous?.state === "accepted") {
@@ -483,10 +485,33 @@ export class ApiServer {
           if (error instanceof OwnerSendConflict) throw new HttpError(409, error.message);
           throw error;
         }
-        const result = await b.agent().ownerSend(text, { requestId, attachments });
+        const result = await b.agent().ownerSend(text, { requestId, attachments, ...(mode ? { mode } : {}) });
         b.ownerAttachments.completeOwnerSend(requestId, fingerprint, result.submissionId);
         return result;
       }
+    }
+
+    if (p === "/api/owner/stop" && method === "POST") {
+      const agent = b.agent();
+      if (!agent.ownerStop) throw new HttpError(404, "not supported");
+      return await agent.ownerStop();
+    }
+
+    if (p === "/api/owner/continue" && method === "POST") {
+      const agent = b.agent();
+      if (!agent.ownerContinue) throw new HttpError(404, "not supported");
+      try {
+        return await agent.ownerContinue();
+      } catch (error) {
+        if ((error as Error)?.name === "ConversationBusy") throw new HttpError(409, "Spencer is already working");
+        throw error;
+      }
+    }
+
+    if ((m = /^\/api\/owner\/queue\/(\d{1,20})$/.exec(p)) && method === "DELETE") {
+      const agent = b.agent();
+      if (!agent.ownerWithdraw) throw new HttpError(404, "not supported");
+      return await agent.ownerWithdraw(m[1]!);
     }
 
     if ((m = /^\/api\/owner\/answers\/(\d{1,20})$/.exec(p)) && method === "GET") {

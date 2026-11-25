@@ -831,6 +831,7 @@ export class Daemon {
       policy: cfg.policy,
       experimental: cfg.experimental,
       ownerBusy: agent?.ownerBusy() ?? false,
+      ownerRun: agent?.ownerRunState?.() ?? { busy: agent?.ownerBusy() ?? false, queue: [] },
       requests: agent?.listRequests?.() ?? [],
       followups: agent?.listFollowups?.() ?? [],
       model: agent?.modelStatus?.(),

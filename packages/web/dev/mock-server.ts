@@ -840,6 +840,7 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       policy,
       experimental,
       ownerBusy,
+      ownerRun: { busy: ownerBusy, queue: [] },
       requests: [...requests.values()].reverse(),
       followups: [...followups.values()],
       model,
@@ -883,13 +884,26 @@ async function api(req: IncomingMessage, url: URL): Promise<unknown> {
       const attached = ids.map((id) => ownerAttachments.get(id));
       if (!text && !ids.length) throw new HttpError(400, "text or attachments are required");
       if (attached.some((item) => !item)) throw new HttpError(400, "attachment unavailable");
-      if (ownerBusy) throw new HttpError(409, "Spencer is still working on the previous message");
       const submissionId = b64u(12);
       if (requestId) ownerSends.set(requestId, { submissionId, text, attachments: ids });
       emitOwner(addOwner({ role: "user", text, ...(attached.length ? { attachments: attached as { id: string; name: string; size: number }[] } : {}) }));
       ownerReply(text || "I received the attached files.");
       return { submissionId };
     }
+  }
+  if (a === "owner" && b === "stop" && !c && method === "POST") {
+    const was = ownerBusy;
+    setBusy(false);
+    return { stopped: was };
+  }
+  if (a === "owner" && b === "continue" && !c && method === "POST") {
+    if (ownerBusy) throw new HttpError(409, "Spencer is already working");
+    const submissionId = b64u(12);
+    ownerReply("Continuing.");
+    return { submissionId };
+  }
+  if (a === "owner" && b === "queue" && c && method === "DELETE") {
+    return { result: "aborted" };
   }
   if (a === "channels" && b) {
     const ch = getChannel(b);

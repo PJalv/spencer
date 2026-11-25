@@ -1176,12 +1176,18 @@ button.reply-ref:hover {
 }
 .trace-log summary,
 .step summary,
+.step-group summary,
+.compact-note summary,
+.ask-collapse summary,
 .exchange summary {
   list-style: none;
   cursor: pointer;
 }
 .trace-log summary::-webkit-details-marker,
 .step summary::-webkit-details-marker,
+.step-group summary::-webkit-details-marker,
+.compact-note summary::-webkit-details-marker,
+.ask-collapse summary::-webkit-details-marker,
 .exchange summary::-webkit-details-marker {
   display: none;
 }
@@ -1298,10 +1304,313 @@ details[open] > summary > .icon:last-child,
   color: var(--ink-3);
 }
 
-/* tool steps */
+/* tool steps & collapsed work groups */
 .steps {
   margin: 10px 0 0 44px;
   border-left: 1px solid var(--line);
+}
+.step-group {
+  margin: 8px 0 0 44px;
+}
+.step-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 8px 2px 6px;
+  font-size: 13px;
+  color: var(--ink-3);
+  border-radius: 8px;
+  transition: background 0.12s, color 0.12s;
+}
+.step-group > summary:hover {
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.step-group-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 14px;
+  color: var(--ink-3);
+}
+.step-group.has-error .step-group-mark {
+  color: var(--bad);
+}
+.step-group-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-group-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.step-group > summary time {
+  margin-left: auto;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.step-group > summary > .icon:last-child,
+.compact-note > summary > .icon:last-child,
+.ask-collapse > summary > .icon:last-child {
+  flex: none;
+  color: var(--ink-3);
+  transition: transform 0.12s;
+}
+.step-group-body {
+  margin-top: 4px;
+  max-height: min(20rem, 50dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.step-group-body .steps {
+  margin: 0 0 2px 8px;
+}
+.steps-live-wrap .step-group.live-earlier {
+  margin-bottom: 4px;
+}
+.steps-live-wrap > .steps {
+  margin-top: 2px;
+}
+
+/* compact collapsible notes (follow-ups, approval summaries, long audit notes) */
+.compact-note {
+  margin: 8px 0 0 44px;
+}
+.compact-note > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 8px 2px 6px;
+  font-size: 13px;
+  color: var(--ink-3);
+  border-radius: 8px;
+  transition: background 0.12s, color 0.12s;
+}
+.compact-note > summary:hover {
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.compact-note-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 14px;
+  color: var(--ink-3);
+}
+.compact-note.approval .compact-note-icon {
+  color: var(--live);
+}
+.compact-note-title {
+  flex: none;
+  max-width: 65%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+.compact-note-title strong {
+  color: var(--ink);
+  font-weight: 550;
+}
+.compact-note-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+}
+.compact-note[open] .compact-note-preview {
+  visibility: hidden;
+}
+.compact-note > summary time {
+  margin-left: auto;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.compact-note-body {
+  margin: 4px 0 4px 20px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+/* decided request card collapse */
+.ask-collapse {
+  margin-top: 8px;
+}
+.ask-collapse > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin: 0 -8px;
+  font-size: 13px;
+  color: var(--ink-3);
+  border-radius: 8px;
+}
+.ask-collapse > summary:hover {
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+.ask-collapse-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-collapse[open] .ask-collapse-preview {
+  visibility: hidden;
+}
+.ask-collapse .ask-text {
+  margin-top: 6px;
+}
+
+/* trace stop button & composer steer/stop controls */
+.trace-action {
+  margin-left: auto;
+}
+.trace-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-2);
+}
+.trace-stop:hover {
+  color: var(--bad);
+}
+.composer-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.composer-mode {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--ink-2);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.composer-mode.steer {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.composer-mode:hover {
+  border-color: var(--line-strong);
+}
+.stop-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.stop-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 20%, transparent);
+}
+.stop-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.stop-btn svg path,
+.trace-stop svg path {
+  fill: currentColor;
+}
+
+/* owner queued steers/follow-ups & continue bar */
+.owner-continue {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+}
+.owner-continue .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.owner-queue {
+  margin: 0 0 8px;
+}
+.owner-queue h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.owner-queue h2 .count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.owner-queue ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+  max-height: 9.5rem;
+  overflow-y: auto;
+}
+.owner-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.owner-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+.pill.accent {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .step summary {
   display: flex;
@@ -2971,6 +3280,8 @@ details[open] > summary > .icon:last-child,
     padding-inline: 12px;
   }
   .steps,
+  .step-group,
+  .compact-note,
   .exchange,
   .note,
   .turn.card {

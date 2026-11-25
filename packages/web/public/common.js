@@ -117,7 +117,7 @@ const openLogs = new Set();
  * this run one click away (a summary by default; watching every step is supervising, not delegating).
  * opts: {key?, avatar: Node, name, activity, steps: string[], since: ms, context?: Node}
  */
-export function trace({ key, avatar: av, name, activity, steps = [], since, context }) {
+export function trace({ key, avatar: av, name, activity, steps = [], since, context, action }) {
   const thinking = /^thinking/i.test(String(activity));
   let log = null;
   if (steps.length) {
@@ -138,6 +138,7 @@ export function trace({ key, avatar: av, name, activity, steps = [], since, cont
         h("span.trace-state", null, thinking ? "thinking" : "working"),
         since ? h("time.trace-time", { "data-since": String(since), "aria-hidden": "true" }, elapsed(Date.now() - since)) : null,
         context,
+        action ? h("span.trace-action", null, action) : null,
       ),
       h("div.trace-now", null, h("span.now-caret", { "aria-hidden": "true" }), activityNode(activity, "shimmer")),
       log,
@@ -165,11 +166,12 @@ setInterval(() => {
  * A multi-line composer. Enter sends, Shift+Enter adds a line.
  * opts: {placeholder, label, hint?: (string|Node)[], left?: Node, popup?: Node, drafts?: Node, canSend?() → boolean, initialText?: string, onTextChange?(text), isBusy?() → boolean, onKey?(e) → handled, onSend(text) → truthy on success}
  */
-export function composer({ placeholder, label, hint, left, popup, drafts, canSend, initialText, onTextChange, isBusy, onKey, onSend }) {
+export function composer({ placeholder, label, hint, left, right, popup, drafts, canSend, initialText, onTextChange, isBusy, onKey, onSend }) {
   const input = h("textarea.composer-input", { rows: "1", placeholder, "aria-label": label, enterkeyhint: "send" });
   input.value = initialText ?? "";
   const sendBtn = h("button.send-btn", { type: "submit", "aria-label": "Send", title: "Send (Enter)", disabled: true }, icon("up", 18));
-  const form = h("form.composer", null, popup, drafts, h("div.composer-box", null, left, input, sendBtn), hint ? h("p.composer-hint", null, hint) : null);
+  const hintEl = hint ? h("p.composer-hint", null, hint) : null;
+  const form = h("form.composer", null, popup, drafts, h("div.composer-box", null, left, input, right, sendBtn), hintEl);
   let busy = false;
   const sync = () => {
     const externallyBusy = !!isBusy?.();
@@ -204,7 +206,7 @@ export function composer({ placeholder, label, hint, left, popup, drafts, canSen
   const onResize = () => sync();
   window.addEventListener("resize", onResize);
   requestAnimationFrame(() => { if (input.isConnected) sync(); });
-  return { form, input, sync, destroy: () => window.removeEventListener("resize", onResize) };
+  return { form, input, sendBtn, hintEl, sync, submit, destroy: () => window.removeEventListener("resize", onResize) };
 }
 
 export const SEND_HINT = () => [h("kbd", null, "Enter"), " to send, ", h("kbd", null, "Shift"), " ", h("kbd", null, "Enter"), " for a new line"];
