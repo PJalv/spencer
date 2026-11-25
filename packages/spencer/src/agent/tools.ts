@@ -32,7 +32,7 @@ export interface ToolDeps {
   askOwner?(ch: string, from: string, text: string): Promise<string>;
   /** Follow-ups for the conversation `key` (owner or ch:<id>). Return the tool's answer. */
   followups?: {
-    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string }): Promise<string | { text: string; isError: true }>;
+    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string; watch?: boolean; maxWakes?: number }): Promise<string | { text: string; isError: true }>;
     cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
   };
   /** `search_news`'s HTTP client (tests replace it). */
@@ -284,6 +284,8 @@ export function ownerTools(deps: ToolDeps): ToolSpec[] {
             inMinutes: AWAIT_REPLY_MINUTES,
             note: `Handle the answer from ${ch.name} to what you sent: ${short}`,
             onReplyFrom: ch.id,
+            watch: true,
+            maxWakes: 5,
           });
           wait = typeof r === "string" ? ` ${r}` : ` (Could not wait for the answer: ${r.text}.)`;
         }
@@ -525,11 +527,12 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         {
           in_minutes: { type: "number", minimum: FOLLOWUP_MIN_MINUTES, maximum: FOLLOWUP_MAX_MINUTES, description: "Minutes from now" },
           note: str("What to do then, with every detail you will need (ids, links, who asked)"),
+          watch: { type: "boolean", description: "Keep waiting for updates until final, timeout, cancellation or five wakes" },
           on_reply_from: str("Owner conversation only: channel id or name whose next peer message wakes you early"),
         },
         ["in_minutes", "note"],
       ),
-      async execute(args: { in_minutes: number; note: string; on_reply_from?: string }, ctx) {
+      async execute(args: { in_minutes: number; note: string; on_reply_from?: string; watch?: boolean }, ctx) {
         if (!deps.followups) return fail("follow-ups are not available");
         const minutes = Number(args.in_minutes);
         if (!Number.isFinite(minutes) || minutes < FOLLOWUP_MIN_MINUTES || minutes > FOLLOWUP_MAX_MINUTES) {
@@ -539,6 +542,7 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         if (!note) return fail("note is empty");
         return deps.followups.schedule(ctx.conversationKey, {
           inMinutes: minutes,
+          watch: args.watch === true,
           note,
           ...(args.on_reply_from ? { onReplyFrom: String(args.on_reply_from) } : {}),
         });

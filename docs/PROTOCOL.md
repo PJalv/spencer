@@ -351,7 +351,12 @@ It triggers a model run (`submit input`, `requestId = msg.id`) only if **all** o
 6. The channel's turn budget allows it (below). Else `"rate limited"` (per-minute burst: the message is skipped) or
    `"budget exhausted"` (the channel pauses and the owner is asked).
 
-The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from]}`, unless the
+Group agent replies resolve explicit `@handle` references against present, named non-self members.
+Their deduplicated `mentions` contains the original sender and those resolved members, excluding self.
+Channel follow-ups use the same resolution. Plain names without `@` do not add recipients; agent messages with
+explicit recipient IDs are routed only to those IDs.
+
+The answer becomes `chat {hop: in.hop+1, by:"agent", replyTo: in.id, mentions:[in.from, ...resolved]}`, unless the
 trimmed answer is `NO_REPLY` (nothing is sent). If the answer ends with the marker `[END]` (on its own line or at the
 end of the last line), the marker is removed and the chat carries `final: true`; an answer that is only `[END]` sends
 nothing. When the message being answered is itself automatic (`hop > 0`) and the answer repeats one of my own last 3
@@ -396,17 +401,24 @@ without trading acknowledgements forever and without a peer being able to run up
   Spencers that predate this version stop at their own cap of 4.
 
 ### 7.3 Owner notification
-When a peer message replies to a message the owner conversation sent, it is appended to the owner
+When a peer message replies to a message the owner conversation sent, or arrives in a channel with an active watch, it is appended to the owner
 conversation as a **write** (it never starts a run), clearly marked as untrusted: the model sees it wrapped in
 `<peer_message>`, and the transcript item has `untrusted: true` (§8), which the UI uses to style it. The owner
 sees the answer there, and the owner's model has it as context the next time the owner speaks.
+
+Channel MCP calls also append an untrusted owner note with a sanitized, bounded result or failure preview. Channel
+follow-up messages append an untrusted summary so the owner can see autonomous outcomes.
+
+Approved peer tasks remain `working` while linked owner follow-ups are pending or running. The task linkage propagates
+through follow-up chains; `completed` (or `failed`) is sent when the chain finishes. Without follow-ups, the first owner
+turn determines the terminal status. Channel agents end approval-wait and refusal messages with `[END]`.
 
 By default a peer can never start a run in the owner conversation. The owner's Spencer can opt in, one message at a
 time: an owner follow-up with `on_reply_from` (or `send_message` with `await_reply`) fires as soon as a peer writes
 in that channel (§7.4).
 
 ### 7.4 Follow-ups ("I'll get back to you")
-An agent that starts something slow (a T3 Code thread, a build) can schedule a reminder on itself and report later
+An agent that starts something slow (a peer task, a build) can schedule a reminder on itself and report later
 without anyone writing first. Tools, offered in the owner conversation and in every channel conversation:
 - `schedule_followup {in_minutes, note}`: `in_minutes` between 1 and 10080 (a week). `note` is what the agent wants
   to do then, in its own words.
@@ -414,12 +426,13 @@ without anyone writing first. Tools, offered in the owner conversation and in ev
 - Owner conversation only: `schedule_followup {…, on_reply_from: <channel>}` also fires as soon as a peer writes in
   that channel; `send_message {…, await_reply: true}` sends and schedules such a follow-up for 60 minutes with the
   note "Handle the answer from <channel> to what you sent: <text>". (`send_message {…, final: true}` sends a closing
-  message instead, §3.1.)
+  message instead, §3.1.) `await_reply` creates a multi-turn watch with at most five wakes. Explicit
+  `schedule_followup` calls can opt in with `watch: true` together with `on_reply_from`.
 
 Storage and delivery (`agent/followups.ts`): rows in `agent_followups` in core.db, so they survive restarts. A timer
 compares `dueAt` with the wall clock at least every 15 s, so a follow-up that came due while the laptop slept fires
 right after wake (Node timers stop during suspend). Firing is exactly-once: `pending → fired` is one conditional
-update, the run is submitted with `requestId = "followup:" + id`, and a channel message is enqueued with
+update, the run is submitted with `requestId = "followup:" + id + ":w" + wake_count`, and a channel message is enqueued with
 `idempotencyKey = "followup:" + id`. On start, fired-but-unfinished follow-ups are resumed.
 
 When one fires, its conversation gets an input (shown in transcripts as "Follow-up: <note>"):
@@ -436,8 +449,11 @@ When one fires, its conversation gets an input (shown in transcripts as "Follow-
 
 **Waking the owner on a reply (opt-in).** This is the one way a peer's message can start a run in the privileged owner
 conversation, so it is guarded by everything above:
-- Only a follow-up the owner's Spencer scheduled with `on_reply_from` fires this way, once (one-shot). The peer
-  decides only *when*; the instruction that runs is the owner agent's own note. The peer's message is appended first as
+- Only a follow-up the owner's Spencer scheduled with `on_reply_from` fires this way. Ordinary follow-ups are
+  one-shot. Watches re-arm after each non-final wake until the wake cap, deadline, peer `final: true`, or cancellation.
+  The owner input identifies the wake and whether the peer ended the exchange. The owner agent can cancel a settled
+  watch with `cancel_followup`. Each wake increments the persisted counter and clears its submission ID before re-arming.
+  The peer decides only *when*; the instruction that runs is the owner agent's own note. The peer's message is appended first as
   an untrusted note ("Message from … (untrusted)" / "Reply from …"), never as instructions.
 - The wake is an automatic turn in that channel: it needs and spends the channel's turn budget (§7.2). If the budget
   is used up, nothing fires early (the follow-up fires at its time) and the usual "continue?" card appears.

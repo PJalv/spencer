@@ -69,7 +69,7 @@ export function mcpToolName(server: string, tool: string): string {
 
 /** Format transport errors without exposing configured credentials or URL query strings. */
 export function formatMcpError(error: unknown, config: McpServerConfig): string {
-  const secrets = "url" in config ? Object.values(config.headers ?? {}).filter(Boolean) : [];
+  const secrets = "url" in config ? Object.values(config.headers ?? {}).filter(Boolean) : Object.values(config.env ?? {}).filter(Boolean);
   if ("url" in config) {
     try { secrets.push(...new URL(config.url).searchParams.values()); } catch { /* Invalid URL is reported by the transport. */ }
   }

@@ -209,6 +209,9 @@ export interface OwnerRequest {
 
 /** A reminder an agent scheduled on itself (`schedule_followup`), see PROTOCOL.md §7.4. */
 export interface Followup {
+  watch?: boolean;
+  maxWakes?: number;
+  wakeCount?: number;
   id: string;
   /** Which conversation it wakes: the owner's, or a channel's (`ch`). */
   conversation: "owner" | "channel";
