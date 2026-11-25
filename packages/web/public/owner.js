@@ -33,7 +33,7 @@ function parseReply(text) {
   return m ? { from: m[1], channel: m[2], text: m[3] } : null;
 }
 
-const isPeerNote = (item) => item.role === "note" && item.untrusted === true && !item.request;
+const isPeerNote = (item) => item.role === "note" && item.untrusted === true && !item.request && !!parseReply(item.text);
 
 /**
  * Consecutive peer notes fold into one row: "3 messages from Bob's Spencer", with the latest one as the

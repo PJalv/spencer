@@ -7,7 +7,7 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerConfig } from "../config.ts";
-import type { EventSink, McpServerStatus } from "../contracts.ts";
+import type { EventSink, McpServerStatus, McpServerEventsStatus } from "../contracts.ts";
 import { spencerVersion } from "../version.ts";
 import type { ToolSpec } from "./runtime.ts";
 
@@ -36,6 +36,8 @@ interface ServerState {
   client?: Client;
   closeTransport?: () => Promise<void>;
   attempt: number;
+  revoked?: boolean;
+  events?: McpServerEventsStatus;
   timer?: ReturnType<typeof setTimeout>;
   /** Bumped on every (re)connect, so stale callbacks from an old client do nothing. */
   generation: number;
@@ -98,6 +100,18 @@ export function formatMcpError(error: unknown, config: McpServerConfig): string 
     .replace(/[\x00-\x1f\x7f]+/g, " ").slice(0, 1000);
 }
 
+export function isAuthRevocationError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const e = current as { code?: unknown; status?: unknown; statusCode?: unknown; cause?: unknown };
+    if ([e.code, e.status, e.statusCode].some((v) => v === 401 || v === 403 || v === "401" || v === "403")) return true;
+    current = e.cause;
+  }
+  return false;
+}
+
 export class McpManager {
   private servers = new Map<string, ServerState>();
   private setQueue = new Map<string, Promise<void>>();
@@ -136,7 +150,7 @@ export class McpManager {
 
   private async applySet(name: string, config: McpServerConfig | undefined): Promise<void> {
     const old = this.servers.get(name);
-    if (old && config && sameConnection(old.config, config)) {
+    if (old && config && !old.revoked && sameConnection(old.config, config)) {
       // Only the tool switches changed: keep the connection.
       old.config = config;
       this.changed();
@@ -182,8 +196,38 @@ export class McpManager {
         tools: s.tools.map((t) => ({ name: t.name, remote: t.remote, ...(t.description ? { description: t.description } : {}), enabled: on(s, t.remote) })),
       };
       if (s.error) out.error = s.error;
+      if (s.events !== undefined) out.events = s.events;
       return out;
     });
+  }
+
+  serverConfig(name: string): McpServerConfig | undefined {
+    const s = this.servers.get(name);
+    return s && !s.config.disabled ? { ...s.config } : undefined;
+  }
+
+  httpServers(): { name: string; url: string; headers?: Record<string, string>; status: McpServerStatus["status"]; revoked: boolean }[] {
+    return [...this.servers.values()].flatMap((s) => "url" in s.config && !s.config.disabled
+      ? [{ name: s.name, url: s.config.url, ...(s.config.headers ? { headers: { ...s.config.headers } } : {}), status: s.status, revoked: !!s.revoked }] : []);
+  }
+
+  setEventsStatus(name: string, events: McpServerEventsStatus | undefined): void {
+    const s = this.servers.get(name);
+    if (!s || JSON.stringify(s.events) === JSON.stringify(events)) return;
+    s.events = events;
+    this.changed();
+  }
+
+  markRevoked(name: string, error: string): void {
+    const s = this.servers.get(name); if (!s) return;
+    const formatted = formatMcpError(error, s.config);
+    s.revoked = true;
+    s.status = "error";
+    s.error = /^authorization failed/i.test(formatted) ? formatted : `authorization failed / revoked: ${formatted}`;
+    s.events = { status: "revoked", error: formatted };
+    s.tools = [];
+    void this.teardown(s);
+    this.changed();
   }
 
   /** Tools of connected servers. */
@@ -254,7 +298,7 @@ export class McpManager {
   }
 
   private async connect(s: ServerState): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || s.revoked) return;
     const generation = ++s.generation;
     s.status = "connecting";
     s.error = undefined;
@@ -313,10 +357,11 @@ export class McpManager {
     } catch (e) {
       if (this.stopped || s.generation !== generation) return;
       const msg = formatMcpError(e, s.config);
+      s.revoked = s.transport === "http" && isAuthRevocationError(e);
       s.status = "error";
-      s.error = msg + (stderrTail ? ` (${stderrTail.trim().split("\n").pop()})` : "");
+      s.error = (s.revoked ? "authorization failed / revoked: " : "") + msg + (stderrTail ? ` (${stderrTail.trim().split("\n").pop()})` : "");
       s.tools = [];
-      await this.teardown(s, false);
+      await this.teardown(s, !!s.revoked);
       this.changed();
       this.schedule(s);
     }
@@ -343,7 +388,7 @@ export class McpManager {
   }
 
   private schedule(s: ServerState): void {
-    if (this.stopped || s.timer) return;
+    if (this.stopped || s.timer || s.revoked) return;
     const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** s.attempt);
     s.attempt++;
     s.timer = setTimeout(() => {

@@ -672,13 +672,18 @@ interface Followup { id: string;
   state: "pending"|"running"|"done"|"cancelled"|"failed";
   depth: number;                                  // follow-ups in a row before this one
   wakeOnReplyIn?: string;                         // owner: fires early when a peer writes in this channel
-  createdAt: number; firedAt?: number; firedBy?: "time"|"reply";
+  createdAt: number; firedAt?: number; firedBy?: "time"|"reply"|"event";
+  eventSubscriptions?: { id: string; server: string; event: string; state: "active"|"revoked"|"ended"; error?: string }[];
   error?: string }                                // why it failed or was cancelled
 interface BioStatus { text: string; maxChars: number;
   sharedChannels: { id: string; name: string; kind: "direct"|"group"; trust: "standard"|"full" }[] }
 interface PeerSummary { id: string; fingerprint: string; name: string | null; about: string | null; aboutAt: number | null;
   channels: { id: string; name: string; kind: "direct"|"group"; about: string | null; aboutAt: number | null }[] }
+interface McpServerEventsStatus { status: "supported"|"unsupported"|"revoked"|"error"|"unknown";
+  protocolVersion?: string; serverIdentity?: string; legacyFallback?: boolean; eventCount?: number;
+  events?: { name: string; description?: string; delivery: ("push"|"poll"|"webhook")[] }[]; error?: string }
 interface McpServer { name: string; transport: "stdio"|"http"; status: "connecting"|"connected"|"error"|"disabled"; error?: string;
+  events?: McpServerEventsStatus;
   tools: { name: string; remote: string; description?: string; enabled: boolean }[] }   // name as exposed (mcp__<server>__<tool>); remote: the server's own; enabled: not in disabledTools
 ```
 
@@ -832,3 +837,9 @@ politely decline clearly out-of-scope requests and end with `[END]`, reserving
 The authenticated local API exposes `GET /api/work-brief` with optional `visibility`, `status`, and `project` filters, `POST /api/work-brief` to insert or upsert by `key`, and `PATCH` or `DELETE /api/work-brief/:id`. Items include a title, summary, visibility (`private`, `trusted`, or `public`), status (`active`, `blocked`, or `done`), optional project, links, source, and expiry. Changes emit a `work_brief` event. Private items stay in the owner context; trusted items may appear in full-trust work channels; public items may appear in standard and full-trust work channels.
 
 POST accepts `notifyOwner` for an untrusted owner note, `wakeOwner` to request an owner turn with the external status wrapped as untrusted data, and `notifyChannel` with an optional `final` flag to post to a permitted channel. Visibility must be `private`, `trusted`, or `public`; `null` is invalid. Unauthorized channel notifications are rejected before writing. The store retains at most 50 live items and the 25 most recently updated completed items. Use a stable key to update an item in place. The `spencer mcp spencer` bridge also provides `spencer_publish_update`, `spencer_work_brief`, `spencer_read_peer`, `spencer_add_memoir_note`, `spencer_send_file`, and `spencer_list_transfers` to local agents and scripts.
+
+### MCP Events reception
+
+Spencer probes configured HTTP MCP servers for MCP `2026-07-28` and the `io.modelcontextprotocol/events` extension (SEP-3415 Beta, with an isolated fallback for servers advertising legacy top-level `capabilities.events`) via `server/discover` and `events/list`. Supported servers expose `events` status on `/api/mcp` and `/api/state`, and `schedule_followup` accepts an optional `on_event: { server, events: [{ name, arguments? }] }` trigger.
+
+Subscriptions use Push (`events/stream`) with automatic Poll (`events/poll`) fallback when an event descriptor advertises `"poll"` without `"push"`. Subscription metadata, persisted cursors, and per-subscription deduplication receipts live in SQLite (`mcp_event_subscriptions`, `mcp_event_receipts`) alongside `agent_watch_updates` so admission, cursor advancement, and wake enqueueing commit atomically. Event payloads are redacted and framed as untrusted data, directing the woken agent to re-read authoritative server state before acting. Gaps/truncations enqueue reconciliation wakes, HTTP `401`/`403` revocations stop streams without retry loops, and channel permission downgrades, deny guardrails, or Conversations mode block and cancel channel event watches.

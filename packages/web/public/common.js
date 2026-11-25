@@ -273,7 +273,19 @@ export function followupList(where, opts = {}) {
         toast("Follow-up cancelled.", "info");
       } else cancel.disabled = false;
     });
-    const when = f.state === "running" ? "now" : f.wakeOnReplyIn ? `on reply, or ${relTime(f.dueAt)}` : relTime(f.dueAt);
+    const eventSubs = f.eventSubscriptions ?? [];
+    const eventSummary = eventSubs.length
+      ? eventSubs.length <= 2
+        ? eventSubs.map((s) => `${s.server}:${s.event}${s.state && s.state !== "active" ? ` (${s.state})` : ""}`).join(", ")
+        : `${eventSubs[0].server} (${eventSubs.length} events)`
+      : null;
+    const when = f.state === "running"
+      ? "now"
+      : f.wakeOnReplyIn
+        ? `on reply, or ${relTime(f.dueAt)}`
+        : eventSummary
+          ? `on ${eventSummary}, or ${relTime(f.dueAt)}`
+          : relTime(f.dueAt);
     return h(
       `li.followup${f.state === "running" ? ".running" : ""}`,
       null,

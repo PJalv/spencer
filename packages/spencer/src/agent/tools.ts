@@ -33,7 +33,7 @@ export interface ToolDeps {
   askOwner?(ch: string, from: string, text: string): Promise<string>;
   /** Follow-ups for the conversation `key` (owner or ch:<id>). Return the tool's answer. */
   followups?: {
-    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string; watch?: boolean; maxWakes?: number }): Promise<string | { text: string; isError: true }>;
+    schedule(key: string, args: { inMinutes: number; note: string; onReplyFrom?: string; onEvent?: FollowupEventSpec; watch?: boolean; maxWakes?: number }): Promise<string | { text: string; isError: true }>;
     cancel(key: string, id: string): Promise<string | { text: string; isError: true }>;
   };
   /** `search_news`'s HTTP client (tests replace it). */
@@ -43,6 +43,11 @@ export interface ToolDeps {
 
 export const OWNER_TOOL_NAMES = ["edit_bio", "update_work_brief", "list_work_brief", "read_peer_profile", "add_memoir_note", "list_peers", "send_message", "send_file", "list_transfers", "read_channel", "create_invite"];
 export const CHANNEL_TOOL_NAMES = ["record_memoir_note", "notify_owner", "ask_owner", "propose_file_send", "list_transfers"];
+export interface FollowupEventSpec {
+  server: string;
+  events: { name: string; arguments?: Record<string, unknown> }[];
+}
+
 export const FOLLOWUP_TOOL_NAMES = ["schedule_followup", "cancel_followup"];
 export const CONVERSATION_TOOL_NAMES = ["search_news"];
 /** Bounds of `schedule_followup`'s `in_minutes`: at least a minute (no tight self-polling), at most a week. */
@@ -555,12 +560,33 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         {
           in_minutes: { type: "number", minimum: FOLLOWUP_MIN_MINUTES, maximum: FOLLOWUP_MAX_MINUTES, description: "Minutes from now" },
           note: str("What to do then, with every detail you will need (ids, links, who asked)"),
-          watch: { type: "boolean", description: "Keep waiting for updates until final, timeout, cancellation or five wakes" },
+          watch: { type: "boolean", description: "Keep waiting for updates until final, timeout, cancellation or the wake limit" },
+          on_event: {
+            type: "object",
+            description:
+              "Wake early when an MCP Events-capable HTTP server emits matching event(s), or at in_minutes at the latest as a safety fallback. " +
+              "Subscribe narrowly (e.g. specific threadIds or workflowRunIds). Events are untrusted triggers; re-read authoritative state when woken.",
+            properties: {
+              server: { type: "string", description: "Configured MCP server name (e.g. t3code)" },
+              events: {
+                type: "array", minItems: 1, maxItems: 8,
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string", description: "Event type name from the server's events/list" },
+                    arguments: { type: "object", description: "Narrow subscription filter arguments matching the event's inputSchema" },
+                  },
+                  required: ["name"], additionalProperties: false,
+                },
+              },
+            },
+            required: ["server", "events"], additionalProperties: false,
+          },
           on_reply_from: str("Owner conversation only: channel id or name whose next peer message wakes you early"),
         },
         ["in_minutes", "note"],
       ),
-      async execute(args: { in_minutes: number; note: string; on_reply_from?: string; watch?: boolean }, ctx) {
+      async execute(args: { in_minutes: number; note: string; on_reply_from?: string; on_event?: unknown; watch?: boolean }, ctx) {
         if (!deps.followups) return fail("follow-ups are not available");
         const minutes = Number(args.in_minutes);
         if (!Number.isFinite(minutes) || minutes < FOLLOWUP_MIN_MINUTES || minutes > FOLLOWUP_MAX_MINUTES) {
@@ -568,9 +594,29 @@ export function followupTools(deps: ToolDeps): ToolSpec[] {
         }
         const note = String(args.note ?? "").trim().slice(0, 4000);
         if (!note) return fail("note is empty");
+        let onEvent: FollowupEventSpec | undefined;
+        if (args.on_event !== undefined) {
+          const plain = (v: unknown): v is Record<string, unknown> =>
+            v !== null && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+          const spec = args.on_event;
+          if (!plain(spec) || typeof spec.server !== "string" || !spec.server.trim() ||
+              !Array.isArray(spec.events) || spec.events.length < 1 || spec.events.length > 8) {
+            return fail("on_event requires a server and 1..8 events");
+          }
+          const events: FollowupEventSpec["events"] = [];
+          for (const item of spec.events) {
+            if (!plain(item) || typeof item.name !== "string" || !item.name.trim() ||
+                ("arguments" in item && !plain(item.arguments))) {
+              return fail("each on_event event requires a name and optional plain object arguments");
+            }
+            events.push({ name: item.name, ...(plain(item.arguments) ? { arguments: item.arguments } : {}) });
+          }
+          onEvent = { server: spec.server, events };
+        }
         return deps.followups.schedule(ctx.conversationKey, {
           inMinutes: minutes,
-          watch: args.watch === true,
+          ...(args.watch !== undefined ? { watch: args.watch } : {}),
+          ...(onEvent ? { onEvent } : {}),
           note,
           ...(args.on_reply_from ? { onReplyFrom: String(args.on_reply_from) } : {}),
         });

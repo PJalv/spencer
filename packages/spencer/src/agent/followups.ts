@@ -51,6 +51,14 @@ export interface FollowupRow {
   updated_at: number;
 }
 
+export type McpEventSubscriptionState = "active" | "revoked" | "ended";
+export interface McpEventSubscriptionRow {
+  id: string; followup_id: string; server_name: string; server_identity: string | null;
+  event_name: string; args_json: string; cursor: string | null; state: McpEventSubscriptionState;
+  last_event_at: number | null; last_heartbeat_at: number | null; error: string | null;
+  created_at: number; updated_at: number;
+}
+
 export interface NewFollowup {
   conv: string;
   ch?: string;
@@ -129,6 +137,17 @@ export class FollowupStore {
       msg_id TEXT NOT NULL, content TEXT NOT NULL, final INTEGER NOT NULL, claimed INTEGER NOT NULL DEFAULT 0,
       UNIQUE(followup_id, msg_id)
     )`);
+    const updateColumns = new Set((this.db.prepare("PRAGMA table_info(agent_watch_updates)").all() as { name: string }[]).map((c) => c.name));
+    if (!updateColumns.has("fired_by")) this.db.exec("ALTER TABLE agent_watch_updates ADD COLUMN fired_by TEXT NOT NULL DEFAULT 'reply'");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS mcp_event_subscriptions (
+      id TEXT PRIMARY KEY, followup_id TEXT NOT NULL, server_name TEXT NOT NULL, server_identity TEXT,
+      event_name TEXT NOT NULL, args_json TEXT NOT NULL, cursor TEXT, state TEXT NOT NULL,
+      last_event_at INTEGER, last_heartbeat_at INTEGER, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mcp_event_subs_followup ON mcp_event_subscriptions (followup_id);
+    CREATE INDEX IF NOT EXISTS mcp_event_subs_active ON mcp_event_subscriptions (state, server_name);
+    CREATE TABLE IF NOT EXISTS mcp_event_receipts (subscription_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      received_at INTEGER NOT NULL, PRIMARY KEY (subscription_id, event_id));`);
     this.db.exec("CREATE INDEX IF NOT EXISTS agent_followups_state ON agent_followups (state, due_at)");
   }
 
@@ -183,9 +202,9 @@ export class FollowupStore {
   claimUpdate(id: string): FollowupRow | undefined {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const next = this.db.prepare("SELECT seq, content, final FROM agent_watch_updates WHERE followup_id = ? AND claimed = 0 ORDER BY seq LIMIT 1")
-        .get(id) as { seq: number; content: string; final: number } | undefined;
-      if (!next || !this.markFired(id, "reply", !!next.final)) {
+      const next = this.db.prepare("SELECT seq, content, final, fired_by FROM agent_watch_updates WHERE followup_id = ? AND claimed = 0 ORDER BY seq LIMIT 1")
+        .get(id) as { seq: number; content: string; final: number; fired_by: "reply" | "event" } | undefined;
+      if (!next || !this.markFired(id, next.fired_by, !!next.final)) {
         this.db.exec("COMMIT");
         return undefined;
       }
@@ -201,6 +220,10 @@ export class FollowupStore {
 
   pendingWatches(): FollowupRow[] {
     return this.db.prepare("SELECT * FROM agent_followups WHERE watch = 1 AND state = 'pending'").all() as unknown as FollowupRow[];
+  }
+
+  hasUnclaimedUpdate(id: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM agent_watch_updates WHERE followup_id = ? AND claimed = 0 LIMIT 1").get(id);
   }
 
   unnotifiedTasks(): FollowupRow[] {
@@ -244,7 +267,7 @@ export class FollowupStore {
   }
 
   /** `pending → fired`; false when it was not pending (already fired or cancelled). */
-  markFired(id: string, by: "time" | "reply", final = false): boolean {
+  markFired(id: string, by: "time" | "reply" | "event", final = false): boolean {
     const now = this.now();
     const r = this.db
       .prepare("UPDATE agent_followups SET state = 'fired', fired_by = ?, fired_at = ?, updated_at = ?, last_msg_final = ?, wake_count = wake_count + 1 WHERE id = ? AND state = 'pending'")
@@ -256,7 +279,7 @@ export class FollowupStore {
 
   rearm(id: string): boolean {
     const r = this.db.prepare(`UPDATE agent_followups SET state = 'pending', submission_id = NULL
-      WHERE id = ? AND state = 'fired' AND watch = 1 AND fired_by = 'reply'
+      WHERE id = ? AND state = 'fired' AND watch = 1 AND fired_by IN ('reply', 'event')
       AND last_msg_final = 0 AND wake_count < max_wakes AND due_at > ?`).run(id, this.now());
     if (!r.changes) return false;
     this.changed(id);
@@ -275,11 +298,15 @@ export class FollowupStore {
 
   /** Ends an open follow-up. Returns false if it had already ended. */
   finish(id: string, state: "done" | "cancelled" | "failed", error?: string): boolean {
-    const r = this.db
-      .prepare("UPDATE agent_followups SET state = ?, error = ?, updated_at = ? WHERE id = ? AND state IN ('pending', 'fired')")
-      .run(state, error?.slice(0, 500) ?? null, this.now(), id);
-    if (Number(r.changes) === 0) return false;
-    this.db.prepare("DELETE FROM agent_watch_updates WHERE followup_id = ?").run(id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const r = this.db.prepare("UPDATE agent_followups SET state = ?, error = ?, updated_at = ? WHERE id = ? AND state IN ('pending', 'fired')")
+        .run(state, error?.slice(0, 500) ?? null, this.now(), id);
+      if (Number(r.changes) === 0) { this.db.exec("COMMIT"); return false; }
+      this.endSubscriptionsForFollowup(id);
+      this.db.prepare("DELETE FROM agent_watch_updates WHERE followup_id = ?").run(id);
+      this.db.exec("COMMIT");
+    } catch (e) { this.db.exec("ROLLBACK"); throw e; }
     this.changed(id);
     this.arm();
     return true;
@@ -290,6 +317,81 @@ export class FollowupStore {
     this.db.prepare("UPDATE agent_followups SET due_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'").run(dueAt, this.now(), id);
     this.changed(id);
     this.arm();
+  }
+
+  insertEventSubscriptions(followupId: string, subs: { serverName: string; serverIdentity?: string | null; eventName: string; argsJson: string; cursor?: string | null }[]): McpEventSubscriptionRow[] {
+    const ids: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const sub of subs) {
+        const id = randomBytes(12).toString("base64url"); ids.push(id);
+        this.db.prepare(`INSERT INTO mcp_event_subscriptions (id, followup_id, server_name, server_identity, event_name, args_json, cursor, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`)
+          .run(id, followupId, sub.serverName, sub.serverIdentity ?? null, sub.eventName, sub.argsJson, sub.cursor ?? null, this.now(), this.now());
+      }
+      this.db.exec("COMMIT");
+    } catch (e) { this.db.exec("ROLLBACK"); throw e; }
+    this.changed(followupId);
+    return ids.map((id) => this.subscription(id)!);
+  }
+
+  subscription(id: string): McpEventSubscriptionRow | undefined {
+    return this.db.prepare("SELECT * FROM mcp_event_subscriptions WHERE id = ?").get(id) as McpEventSubscriptionRow | undefined;
+  }
+  subscriptionsForFollowup(id: string): McpEventSubscriptionRow[] {
+    return this.db.prepare("SELECT * FROM mcp_event_subscriptions WHERE followup_id = ?").all(id) as unknown as McpEventSubscriptionRow[];
+  }
+  activeSubscriptions(serverName?: string): McpEventSubscriptionRow[] {
+    return this.db.prepare(`SELECT s.* FROM mcp_event_subscriptions s JOIN agent_followups f ON f.id = s.followup_id
+      WHERE s.state = 'active' AND f.state IN ('pending', 'fired') AND (? IS NULL OR s.server_name = ?)`)
+      .all(serverName ?? null, serverName ?? null) as unknown as McpEventSubscriptionRow[];
+  }
+  private admit(subscriptionId: string, key: string, cursor: string | null | undefined, content: string, final: boolean, gap: boolean): { admitted: boolean; duplicate: boolean; followupId?: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const sub = this.db.prepare(`SELECT s.followup_id FROM mcp_event_subscriptions s JOIN agent_followups f ON f.id = s.followup_id
+        WHERE s.id = ? AND s.state = 'active' AND f.watch = 1 AND f.state IN ('pending', 'fired') AND f.due_at > ?`).get(subscriptionId, this.now()) as { followup_id: string } | undefined;
+      if (!sub) { this.db.exec("COMMIT"); return { admitted: false, duplicate: false }; }
+      const msgId = `mcp${gap ? "-gap" : ""}:${subscriptionId}:${key}`;
+      const result = gap
+        ? this.db.prepare("INSERT OR IGNORE INTO agent_watch_updates (followup_id, msg_id, content, final, fired_by) VALUES (?, ?, ?, 0, 'event')").run(sub.followup_id, msgId, content)
+        : this.db.prepare("INSERT OR IGNORE INTO mcp_event_receipts (subscription_id, event_id, received_at) VALUES (?, ?, ?)").run(subscriptionId, key, this.now());
+      if (!result.changes) {
+        if (!gap && cursor) {
+          this.db.prepare("UPDATE mcp_event_subscriptions SET cursor = COALESCE(?, cursor), updated_at = ? WHERE id = ?")
+            .run(cursor, this.now(), subscriptionId);
+        }
+        this.db.exec("COMMIT");
+        return { admitted: false, duplicate: true, followupId: sub.followup_id };
+      }
+      if (!gap) this.db.prepare("INSERT INTO agent_watch_updates (followup_id, msg_id, content, final, fired_by) VALUES (?, ?, ?, ?, 'event')").run(sub.followup_id, msgId, content, final ? 1 : 0);
+      this.db.prepare(`UPDATE mcp_event_subscriptions SET cursor = COALESCE(?, cursor),
+        last_event_at = CASE WHEN ? THEN last_event_at ELSE ? END, updated_at = ? WHERE id = ?`)
+        .run(cursor ?? null, gap ? 1 : 0, this.now(), this.now(), subscriptionId);
+      this.db.exec("COMMIT");
+      return { admitted: true, duplicate: false, followupId: sub.followup_id };
+    } catch (e) { this.db.exec("ROLLBACK"); throw e; }
+  }
+  admitEvent(opts: { subscriptionId: string; eventId: string; cursor?: string | null; content: string; final?: boolean }): { admitted: boolean; duplicate: boolean; followupId?: string } {
+    return this.admit(opts.subscriptionId, opts.eventId, opts.cursor, opts.content, !!opts.final, false);
+  }
+  admitGap(opts: { subscriptionId: string; gapKey: string; cursor?: string | null; content: string }): { admitted: boolean; followupId?: string } {
+    const { admitted, followupId } = this.admit(opts.subscriptionId, opts.gapKey, opts.cursor, opts.content, false, true);
+    return { admitted, ...(followupId ? { followupId } : {}) };
+  }
+  updateSubscriptionCursor(id: string, cursor: string | null, opts?: { heartbeat?: boolean; serverIdentity?: string }): void {
+    this.db.prepare(`UPDATE mcp_event_subscriptions SET cursor = COALESCE(?, cursor), last_heartbeat_at = CASE WHEN ? THEN ? ELSE last_heartbeat_at END,
+      server_identity = COALESCE(?, server_identity), updated_at = ? WHERE id = ?`).run(cursor, opts?.heartbeat ? 1 : 0, this.now(), opts?.serverIdentity ?? null, this.now(), id);
+  }
+  setSubscriptionState(id: string, state: McpEventSubscriptionState, error?: string): boolean {
+    const sub = this.subscription(id); if (!sub || (sub.state === state && sub.error === (error?.slice(0, 500) ?? null))) return false;
+    this.db.prepare("UPDATE mcp_event_subscriptions SET state = ?, error = ?, updated_at = ? WHERE id = ?").run(state, error?.slice(0, 500) ?? null, this.now(), id);
+    this.changed(sub.followup_id); return true;
+  }
+  endSubscriptionsForFollowup(id: string, state: "ended" | "revoked" = "ended", error?: string): McpEventSubscriptionRow[] {
+    const subs = this.subscriptionsForFollowup(id).filter((s) => s.state === "active");
+    this.db.prepare("UPDATE mcp_event_subscriptions SET state = ?, error = ?, updated_at = ? WHERE followup_id = ? AND state = 'active'").run(state, error?.slice(0, 500) ?? null, this.now(), id);
+    this.db.prepare("DELETE FROM mcp_event_receipts WHERE subscription_id IN (SELECT id FROM mcp_event_subscriptions WHERE followup_id = ?)").run(id);
+    return subs;
   }
 
   private changed(id: string): void {
@@ -342,7 +444,7 @@ export class FollowupStore {
   }
 }
 
-export function toFollowup(r: FollowupRow): Followup {
+export function toFollowup(r: FollowupRow, subs?: McpEventSubscriptionRow[] | number): Followup {
   const ch = r.ch ?? undefined;
   return {
     id: r.id,
@@ -358,7 +460,8 @@ export function toFollowup(r: FollowupRow): Followup {
     wakeCount: r.wake_count,
     createdAt: r.created_at,
     ...(r.fired_at ? { firedAt: r.fired_at } : {}),
-    ...(r.fired_by === "time" || r.fired_by === "reply" ? { firedBy: r.fired_by } : {}),
+    ...(Array.isArray(subs) ? { eventSubscriptions: subs.map((s) => ({ id: s.id, server: s.server_name, event: s.event_name, state: s.state, ...(s.error ? { error: s.error } : {}) })) } : {}),
+    ...(r.fired_by === "time" || r.fired_by === "reply" || r.fired_by === "event" ? { firedBy: r.fired_by } : {}),
     ...(r.error ? { error: r.error } : {}),
   };
 }
